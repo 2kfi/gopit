@@ -1,0 +1,10 @@
+# gopit (server) configuration
+listen_addr: ":8080"                    # HTTP listen address for the dashboard + API
+db_path: gopit.db                     # SQLite database path
+jwt_secret: ""                         # empty = auto-generated and persisted in settings on first run
+admin_username: admin                  # bootstrap admin, created only when the DB is empty
+admin_password: admin                  # bootstrap admin password (change after first login)
+discovery_broadcast_addr: 255.255.255.255  # UDP broadcast target for the DISCOVER probe
+discovery_port: 1221                   # UDP port the agents' beacons listen on
+tls_skip_verify: true                  # accept agent self-signed TLS certs; pin a CA when TLS is mandatory
+pairing_token: change-me               # shared with agents; assigned to discovered nodes so approve can authenticate
