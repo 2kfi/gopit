@@ -9,7 +9,7 @@ cloud, no account.
 ┌──────────────┐   HTTP + WS    ┌───────────────────────┐   WS + UDP    ┌─────────────────┐
 │   Browser    │ ─────────────► │  gopit        │ ────────────► │ gopitd    │
 │  dashboard   │   :8080        │  (SQLite, JWT, hub)   │   :1221/TCP   │ (on each node)  │
-└──────────────┘                │                      │   :1221/UDP   │ docker, ufw,    │
+└──────────────┘                │                      │   :1221/UDP   │ docker, firewall, │
                                 └───────────────────────┘               │ pty, gopsutil   │
                                                                         └─────────────────┘
 ```
@@ -28,12 +28,17 @@ Both sides install with one script — **one mode at a time**:
 sudo ./install.sh server          # prompts admin creds, prints a pairing token
 
 # on each node to manage
-sudo TOKEN=<pairing-token> ./install.sh agent --apply-ufw
+sudo TOKEN=<pairing-token> ./install.sh agent   # add --apply-ufw only with firewall: ufw (see below)
 ```
 
 Then open `http://<server-ip>:8080`, log in, **Nodes → Discover**, and
 **Approve** the nodes that appear. Wait ~2s and their status flips to
 `online`; click through to Dashboard, Docker, Terminal, or Firewall.
+
+Firewall control defaults to `firewall: nftfw` in the agent config: direct
+netlink (kernel netfilter), no sudo, `CAP_NET_ADMIN` on the systemd unit.
+Set `firewall: ufw` to fall back to the legacy ufw/sudo path — only then use
+`--apply-ufw` at install.
 
 Prefer to run it manually (no systemd)? Both binaries take `-config`, and
 example configs live in `configs/`:
@@ -59,7 +64,7 @@ make build-all                       # built to bin/
 
 ```
 cmd/gopit    server entry point        internal/server/   HTTP API, store, node manager
-cmd/gopitd     agent entry point         internal/agent/    ws, beacon, stats, docker, terminal, ufw
+cmd/gopitd     agent entry point         internal/agent/    ws, beacon, stats, docker, terminal, firewall
 web/                 Vite frontend (vanilla JS, xterm.js bundled)
 configs/             example YAMLs             install.sh         one-mode-at-a-time installer
 ```

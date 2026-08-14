@@ -5,19 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const cmdTimeout = 15 * time.Second
 
 // API executes ufw commands via sudo for the agent's ufw.* WS methods.
+// A single mutex serializes all calls: ufw has no transactional interface, so
+// concurrent mutations would race rule numbering (delete-by-number TOCTOU).
+// ufw ops are rare; contention is a non-issue.
+// ponytail: global lock, per-call locks if throughput matters.
 type API struct {
 	bin         string // absolute ufw binary path, e.g. /usr/sbin/ufw
 	allowToggle bool   // permit ufw enable/disable (off by default)
+	mu          sync.Mutex
 }
 
 // New builds the API. Construction never fails: availability is probed on the
@@ -49,6 +56,8 @@ type ToggleReq struct {
 // Call executes one ufw.* method with the raw request payload and returns the
 // response payload (already JSON-marshalable).
 func (a *API) Call(method string, payload json.RawMessage) (any, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	switch method {
 	case "ufw.status":
 		return a.Status()
@@ -77,8 +86,17 @@ func (a *API) Call(method string, payload json.RawMessage) (any, error) {
 		if req.Enabled {
 			arg = "enable"
 		}
-		_, err := a.run(arg)
+		// --force: modern ufw prompts "Proceed with operation?" and aborts
+		// when stdin is closed, so the toggle would silently never apply.
+		_, err := a.run("--force", arg)
 		return map[string]string{"status": "ok"}, err
+	case "ufw.rule.preview":
+		var req RuleAddReq
+		if err := json.Unmarshal(payload, &req); err != nil ||
+			req.Port < 1 || req.Port > 65535 || !oneOf(req.Protocol, "tcp", "udp", "both") || !oneOf(req.Action, "allow", "deny", "reject") {
+			return nil, errors.New("protocol (tcp|udp|both), port (1-65535) and action (allow|deny|reject) required")
+		}
+		return a.preview(req)
 	default:
 		return nil, fmt.Errorf("unknown ufw method: %s", method)
 	}
@@ -103,16 +121,60 @@ func (a *API) Status() (*Status, error) {
 }
 
 func (a *API) delete(number int) error {
-	_, err := a.run("delete", strconv.Itoa(number))
+	_, err := a.run("--force", "delete", strconv.Itoa(number))
 	return err
+}
+
+// preview returns the current status with the new rule simulated. ufw has no
+// dry-run, so the simulated entry is appended as the next number; the real
+// numbering may differ slightly (ufw expands tcp+udp "both" into two rows),
+// which is fine for a preview.
+func (a *API) preview(req RuleAddReq) (*Status, error) {
+	st, err := a.Status()
+	if err != nil {
+		return nil, err
+	}
+	if req.From != "" && !oneOf(req.From, "any", "Anywhere") {
+		if _, _, err := net.ParseCIDR(req.From); err != nil {
+			if net.ParseIP(req.From) == nil {
+				return nil, errors.New("invalid 'from' address")
+			}
+		}
+	}
+	to := strconv.Itoa(req.Port)
+	if req.Protocol != "both" {
+		to += "/" + req.Protocol
+	}
+	from := req.From
+	if from == "" || oneOf(from, "any", "Anywhere") {
+		from = "Anywhere"
+	}
+	st.Rules = append(st.Rules, Rule{
+		Number:    len(st.Rules) + 1,
+		To:        to,
+		Action:    strings.ToUpper(req.Action),
+		From:      from,
+		Direction: "IN",
+		Interface: req.Interface,
+	})
+	return st, nil
 }
 
 func (a *API) addRule(req RuleAddReq) error {
 	args := []string{req.Action}
 	if req.Interface != "" {
+		if len(req.Interface) > 15 || strings.ContainsAny(req.Interface, " \t") || strings.HasPrefix(req.Interface, "-") {
+			return errors.New("invalid 'interface' name")
+		}
 		args = append(args, "in", "on", req.Interface)
 	}
 	if req.From != "" && !oneOf(req.From, "any", "Anywhere") {
+		// validated so a leading '-' can't be parsed as a ufw option
+		if _, _, err := net.ParseCIDR(req.From); err != nil {
+			if net.ParseIP(req.From) == nil {
+				return errors.New("invalid 'from' address")
+			}
+		}
 		args = append(args, "from", req.From)
 	}
 	args = append(args, "to", "any", "port", strconv.Itoa(req.Port))
@@ -131,7 +193,7 @@ func (a *API) run(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sudo", append([]string{"-n", a.bin}, args...)...)
-	cmd.Env = envWithoutAskpass()
+	cmd.Env = append(envWithoutAskpass(), "LC_ALL=C") // localized ufw output must not break the parser
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))

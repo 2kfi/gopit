@@ -2,7 +2,7 @@ package ws
 
 import (
 	"encoding/json"
-	"time"
+	"log/slog"
 
 	"github.com/gorilla/websocket"
 
@@ -17,7 +17,7 @@ import (
 // envelopes. The connection is closed by the client to end the session, or
 // the pty pump emits terminal.exit when the shell dies on its own.
 func (h *Handler) TerminalOpen(c *wsconn.Conn, e protocol.Envelope, st *ConnState) {
-	if st.term != nil {
+	if st.curTerm() != nil {
 		respondErr(c, e.ID, "a terminal is already open on this connection")
 		return
 	}
@@ -32,33 +32,41 @@ func (h *Handler) TerminalOpen(c *wsconn.Conn, e protocol.Envelope, st *ConnStat
 		return
 	}
 	// Password is never logged; it only ever reaches the validation pty.
-	s, err := terminal.Open(req.User, req.Password, req.Cols, req.Rows)
+	var rec *terminal.Recorder
+	if h.Term.Record {
+		if r, rerr := terminal.NewRecorder(h.Term.RecordingDir, h.Term.NodeID); rerr != nil {
+			slog.Warn("session recording unavailable, continuing unrecorded", "err", rerr)
+		} else {
+			rec = r
+		}
+	}
+	s, err := terminal.Open(req.User, req.Password, req.Cols, req.Rows, rec)
 	if err != nil {
 		respondErr(c, e.ID, err.Error())
 		return
 	}
-	st.term = s
+	st.setTerm(s)
 	respond(c, e.ID, map[string]string{"status": "ok"})
 	go pump(c, st, s)
 }
 
 // pump fans pty output into binary frames. Backpressure: the underlying
 // socket write blocks the pty read (nothing is dropped while the client is
-// healthy); a stalled client drops chunks after 1s (bounded memory).
+// healthy); a stalled client trips wsconn's write deadline, which ends the
+// session rather than orphaning the shell.
 // ponytail: blocking read->write loop instead of a buffered fan-in chan,
 // add one only if the pty must keep draining while the socket stalls.
 func pump(c *wsconn.Conn, st *ConnState, s *terminal.Session) {
 	buf := make([]byte, 32768)
+	dead := false
 	for {
 		n, err := s.Read(buf)
 		if n > 0 {
-			select {
-			case <-time.After(time.Second):
-				// client stalled; drop rather than block the pty forever
-			default:
-				if c.WriteMessage(websocket.BinaryMessage, buf[:n]) != nil {
-					break // conn dead; serveConn's defer tears the session down
-				}
+			if c.WriteMessage(websocket.BinaryMessage, buf[:n]) != nil {
+				dead = true
+			}
+			if dead {
+				break // conn dead; the session is closed below
 			}
 			continue
 		}
@@ -66,17 +74,23 @@ func pump(c *wsconn.Conn, st *ConnState, s *terminal.Session) {
 			break // pty closed or shell exited
 		}
 	}
-	// Shell died or session was closed: notify, unless a new session already
-	// took over this connection.
-	if st.term == s {
-		st.term = nil
-		c.WriteJSON(protocol.NewEvent(MethodTerminalExit, map[string]string{}))
+	if dead {
+		// Nothing will ever read this pty again, so tear the session down
+		// here; serveConn's defer only runs when its read loop errors.
+		s.Close()
+	}
+	// Shell died on its own: notify, unless a new session already took
+	// over this connection.
+	if st.curTerm() == s {
+		st.takeTerm()
+		c.WriteJSON(protocol.NewEvent(protocol.MethodTerminalExit, map[string]string{}))
 	}
 }
 
 // TerminalResize resizes the active session, if any.
 func (h *Handler) TerminalResize(c *wsconn.Conn, e protocol.Envelope, st *ConnState) {
-	if st.term == nil {
+	s := st.curTerm()
+	if s == nil {
 		respondErr(c, e.ID, "no active terminal")
 		return
 	}
@@ -85,7 +99,7 @@ func (h *Handler) TerminalResize(c *wsconn.Conn, e protocol.Envelope, st *ConnSt
 		Rows int `json:"rows"`
 	}
 	json.Unmarshal(e.Payload, &req)
-	if err := st.term.Resize(req.Cols, req.Rows); err != nil {
+	if err := s.Resize(req.Cols, req.Rows); err != nil {
 		respondErr(c, e.ID, err.Error())
 		return
 	}
@@ -95,11 +109,11 @@ func (h *Handler) TerminalResize(c *wsconn.Conn, e protocol.Envelope, st *ConnSt
 // TerminalClose tears the active session down; a later terminal.open may
 // start a new one on the same connection.
 func (h *Handler) TerminalClose(c *wsconn.Conn, e protocol.Envelope, st *ConnState) {
-	if st.term == nil {
+	s := st.takeTerm()
+	if s == nil {
 		respondErr(c, e.ID, "no active terminal")
 		return
 	}
-	st.term.Close()
-	st.term = nil
+	s.Close()
 	respond(c, e.ID, map[string]string{"status": "ok"})
 }

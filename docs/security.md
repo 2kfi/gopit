@@ -39,14 +39,20 @@ against a MITM who can intercept the dial and impersonate the agent with
 their own cert. For LAN management this is the accepted trade; the knob
 exists to tighten it (pin the agent cert on the server side).
 
-## Sudoers, exact
+## Firewall privilege model
 
-`install.sh agent` writes `/etc/sudoers.d/gopit-gopitd`:
+The default backend is `nftfw`: the agent manages the firewall directly via
+netlink and needs only `CAP_NET_ADMIN` (the systemd unit ships
+`AmbientCapabilities=CAP_NET_ADMIN` + a bounded capability set) — no root,
+no sudo, no daemon.
+
+Legacy `ufw` mode (`firewall: ufw` in the agent config) shells out via
+scoped sudo. `install.sh agent` writes `/etc/sudoers.d/gopit-node-agent`:
 
 ```
 gopitd ALL=(root) NOPASSWD: /usr/sbin/ufw status*, /usr/sbin/ufw allow*,
-    /usr/sbin/ufw delete*, /usr/sbin/ufw default*, /usr/sbin/ufw enable,
-    /usr/sbin/ufw disable
+    /usr/sbin/ufw deny*, /usr/sbin/ufw reject*, /usr/sbin/ufw --force delete*,
+    /usr/sbin/ufw --force enable, /usr/sbin/ufw default*, /usr/sbin/ufw disable
 ```
 
 - No blanket `ALL`. No shell access. No other binaries.
@@ -63,8 +69,8 @@ gopitd ALL=(root) NOPASSWD: /usr/sbin/ufw status*, /usr/sbin/ufw allow*,
 - Needing root in a terminal is handled by the agent: it starts `su -l`
   inside the PTY, so the root password is typed into the PTY on the node and
   never appears in the payloads the server/browser relays.
-- The terminal session itself runs with a session lock on the node (one
-  terminal per agent) — no background shells left behind.
+- No background shells are left behind: closing the connection tears the
+  PTY process group down.
 
 ## Dashboard auth
 
@@ -73,7 +79,30 @@ gopitd ALL=(root) NOPASSWD: /usr/sbin/ufw status*, /usr/sbin/ufw allow*,
 - Subsequent logins validate against the sessions table. Sessions are JWT
   (secret auto-generated into `settings`), set as HttpOnly + SameSite
   cookies, so day-to-day dashboard access never leaves the browser's cookie
-  jar.
+  jar. The cookie gets the `Secure` flag automatically when the request is
+  HTTPS or comes through an `X-Forwarded-Proto: https` proxy.
+- Failed logins are throttled per IP (10 failures per 15 minutes → 429);
+  successful logins don't count, so users behind a shared NAT don't lock
+  each other out. The limiter is single-process — pin `jwt_secret` and
+  front it with nginx/Redis rate limiting for multi-server setups.
+- Every non-GET `/api` request (login, firewall, docker, users, …) is
+  written to the server log: method, path, user, status, duration. Bodies
+  and the pairing token are never logged; `terminal.open` is logged with
+  the node and the *login user* — never the password.
+- State-changing requests are additionally checked for a cross-site
+  `Origin` header (CSRF): a browser `Origin` that doesn't match the server
+  host is rejected with 403. Clients that send no `Origin` (curl, agents)
+  pass — full protection would need a CSRF token.
+- A deleted user's sessions die immediately: every request re-validates the
+  JWT's user against the store, not just the signature.
+
+## Keepalive and dead connections
+
+- The server pings agents every 30s; the agent treats 90s of silence as a
+  dead peer and tears down the connection (and any open terminal session).
+- On the dashboard side, the browser pings the status stream every 25s; the
+  server pings terminal and docker-log sockets (browsers auto-pong) so a
+  half-open browser dies within ~90s even on sockets that carry no traffic.
 
 ## Known limits / honest caveats
 

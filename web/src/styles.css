@@ -550,6 +550,103 @@ textarea:focus {
 .table-nested td { padding: 6px 12px; border-bottom: 1px solid var(--hairline); }
 .table-nested tr:last-child td { border-bottom: none; }
 
+/* ---------- pairing token / wizard ---------- */
+code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--hairline);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.pair-panel { margin-bottom: 18px; }
+
+.pair-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+}
+
+.pair-note { font-size: 13px; }
+
+.tok {
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  background: rgba(3, 7, 12, 0.6);
+  padding: 7px 12px;
+}
+
+.tok-input {
+  width: 180px;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: 6px 10px;
+}
+
+.code-block {
+  margin: 0;
+  padding: 14px 16px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: rgba(3, 7, 12, 0.7);
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.code-block-actions { margin-top: 8px; }
+
+.hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.block { display: block; margin-top: 8px; }
+
+.wizard-wrap {
+  flex: 1;
+  display: grid;
+  place-items: start center;
+  min-height: 100vh;
+  padding: 48px 20px 60px;
+}
+
+.wizard-card {
+  width: min(620px, 100%);
+  padding: 34px 34px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wizard-card .brand { font-size: 24px; display: block; margin-bottom: 2px; }
+.wizard-card h3 { margin-top: 18px; }
+
+.wiz-table { margin-top: 12px; }
+
+#add-scan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 /* ---------- dashboard ---------- */
 .grid-gauges {
   display: grid;
@@ -627,6 +724,21 @@ textarea:focus {
 
 /* ---------- motion ---------- */
 @keyframes blink { 50% { opacity: 0; } }
+
+/* ---------- password strength meter ---------- */
+.pw-meter {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--hairline);
+  overflow: hidden;
+  margin: -6px 0 10px;
+}
+.pw-meter-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  transition: width 0.2s ease, background 0.2s ease;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

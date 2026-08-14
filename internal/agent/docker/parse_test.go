@@ -25,6 +25,29 @@ webstack            exited(0)           /home/user/web/compose.yml
 	}
 }
 
+func TestParseComposeConfig(t *testing.T) {
+	raw := `{"name":"webstack","services":{"web":{"image":"nginx:alpine","ports":["8080:80/tcp"]},"db":{"image":"postgres:16"}},"networks":{"webnet":{"driver":"bridge"}},"volumes":{"pgdata":{"driver":"local"}}}`
+	got, err := parseComposeConfig(raw)
+	if err != nil {
+		t.Fatalf("parseComposeConfig error: %v", err)
+	}
+	want := &ComposeConfig{
+		Services: []ValidateService{
+			{Name: "db", Image: "postgres:16"},
+			{Name: "web", Image: "nginx:alpine", Ports: []string{"8080:80/tcp"}},
+		},
+		Networks: []string{"webnet"},
+		Volumes:  []string{"pgdata"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseComposeConfig mismatch:\n got %+v\nwant %+v", got, want)
+	}
+
+	if _, err := parseComposeConfig("not json"); err == nil {
+		t.Error("invalid JSON should yield an error")
+	}
+}
+
 func TestParseComposePS(t *testing.T) {
 	raw := `[{"ID":"abc123","Name":"webstack-web-1","Project":"webstack","Service":"web","State":"running","Health":"","ExitCode":0,"Image":"nginx:alpine","Status":"Up 2 minutes","Ports":"0.0.0.0:8080->80/tcp"}]`
 	got, err := parseComposePS(raw)

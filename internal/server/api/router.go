@@ -11,25 +11,65 @@ import (
 
 	webui "gopit" // root package: embeds web/dist
 	"gopit/internal/server/discovery"
+	"gopit/internal/server/metrics"
 	"gopit/internal/server/nodemanager"
 	"gopit/internal/server/store"
+	"gopit/internal/server/webhooks"
 )
 
+// Version is the server build version; stamp at build time via
+// -ldflags "-X gopit/internal/server/api.Version=x.y.z".
+var Version = "dev"
+
 // Router builds the full HTTP router: API + embedded SPA.
-func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secret string, tlsSkipVerify bool) http.Handler {
+func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secret, pairToken string, tlsSkipVerify bool, rateLimitPerMin int, passwordMinScore int, hooks *webhooks.Store) http.Handler {
 	r := chi.NewRouter()
+	r.Use(metrics.Middleware)
 	auth := NewAuth(s, secret)
-	authAPI := NewAuthAPI(s, auth)
-	nodesAPI := NewNodesAPI(s, m, *disc)
+	csrf := NewCSRFToken()
+	rl := NewRateLimiter(rateLimitPerMin, rateLimitPerMin/5+1)
+	authAPI := NewAuthAPI(s, auth, csrf, passwordMinScore, hooks)
+	nodesAPI := NewNodesAPI(s, m, *disc, pairToken)
 	statusAPI := NewStatusAPI(m, s)
-	dockerAPI := NewDockerAPI(m)
-	firewallAPI := NewFirewallAPI(m)
+	dockerAPI := NewDockerAPI(m, hooks)
+	firewallAPI := NewFirewallAPI(m, hooks)
 	terminalAPI := NewTerminalAPI(s, tlsSkipVerify)
 
+	// /metrics is unauthenticated (scraped by Prometheus); keep it outside
+	// /api so it skips auth, CSRF and rate limiting.
+	r.Get("/metrics", metrics.Handler().ServeHTTP)
+
 	r.Route("/api", func(r chi.Router) {
+		r.Use(rl.Middleware)
+		r.Use(originCheck)
+		r.Use(auth.AuditLog)
+		// /api/health: unauthenticated liveness for LB/k8s probes. The DB
+		// ping plus node counts reflect real readiness; version aids
+		// rollback verification. Failures answer 503 so probes drain us.
+		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+			total, err := s.CountNodes()
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{
+					"db": "error", "error": err.Error(),
+					"nodes_online": 0, "nodes_total": 0, "version": Version,
+				})
+				return
+			}
+			resp := map[string]any{
+				"db": "ok", "nodes_online": m.Count(), "nodes_total": total, "version": Version,
+			}
+			if err := s.Ping(); err != nil {
+				resp["db"] = "error"
+				writeJSON(w, http.StatusServiceUnavailable, resp)
+				return
+			}
+			writeJSON(w, http.StatusOK, resp)
+		})
 		r.Post("/login", authAPI.Login)
 		r.Group(func(r chi.Router) {
 			r.Use(auth.Middleware)
+			r.Use(CSRFMiddleware(csrf))
+			r.Get("/me", authAPI.Me)
 			r.Post("/logout", authAPI.Logout)
 			r.Put("/password", authAPI.ChangePassword)
 
@@ -39,6 +79,9 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 			r.Post("/nodes/{uuid}/approve", nodesAPI.Approve)
 			r.Post("/nodes/{uuid}/token", nodesAPI.SetToken)
 			r.Delete("/nodes/{uuid}", nodesAPI.Delete)
+
+			r.Get("/wizard", nodesAPI.WizardInfo)
+			r.Post("/wizard/done", nodesAPI.WizardDone)
 
 			r.Get("/nodes/{uuid}/status", statusAPI.Stream)
 			r.Get("/nodes/{uuid}/terminal", terminalAPI.Stream)
@@ -54,11 +97,13 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 			r.Get("/nodes/{uuid}/volumes", dockerAPI.Volumes)
 			r.Delete("/nodes/{uuid}/volumes/{id}", dockerAPI.RemoveVolume)
 			r.Get("/nodes/{uuid}/compose", dockerAPI.ComposeStacks)
+			r.Post("/nodes/{uuid}/compose/validate", dockerAPI.ComposeValidate)
 			r.Post("/nodes/{uuid}/compose/deploy", dockerAPI.ComposeDeploy)
 			r.Post("/nodes/{uuid}/compose/{name}/down", dockerAPI.ComposeDown)
 			r.Get("/nodes/{uuid}/compose/{name}/ps", dockerAPI.ComposePS)
 
 			r.Get("/nodes/{uuid}/firewall", firewallAPI.Status)
+			r.Post("/nodes/{uuid}/firewall/preview", firewallAPI.Preview)
 			r.Post("/nodes/{uuid}/firewall/rules", firewallAPI.AddRule)
 			r.Delete("/nodes/{uuid}/firewall/rules/{number}", firewallAPI.DeleteRule)
 			r.Post("/nodes/{uuid}/firewall/toggle", firewallAPI.Toggle)
@@ -68,6 +113,7 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 				r.Post("/users", authAPI.CreateUser)
 				r.Get("/users", authAPI.ListUsers)
 				r.Delete("/users/{id}", authAPI.DeleteUser)
+				r.Post("/admin/jwt/rotate", authAPI.RotateJWT)
 			})
 		})
 	})

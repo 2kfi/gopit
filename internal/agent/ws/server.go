@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -27,13 +28,38 @@ type Server struct {
 	upgrader        websocket.Upgrader
 	mu              sync.Mutex
 	conns           map[*wsconn.Conn]struct{}
-	control         *wsconn.Conn // stats events go to this conn (first registered)
 	closed          chan struct{}
 }
 
-// ConnState is per-connection state owned by the read loop.
+// ConnState is per-connection state touched by the read loop and the pty
+// pump goroutine; mu guards the session pointer.
 type ConnState struct {
+	mu   sync.Mutex
 	term *terminal.Session // non-nil while a terminal session is open on this conn
+}
+
+// setTerm records the active session (read loop only, under mu).
+func (st *ConnState) setTerm(s *terminal.Session) {
+	st.mu.Lock()
+	st.term = s
+	st.mu.Unlock()
+}
+
+// takeTerm returns the active session and clears the slot; the caller owns
+// closing it. Returns nil when no session is open.
+func (st *ConnState) takeTerm() *terminal.Session {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	s := st.term
+	st.term = nil
+	return s
+}
+
+// curTerm returns the active session without clearing it.
+func (st *ConnState) curTerm() *terminal.Session {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.term
 }
 
 // NewServer creates the WS server; call Start to run it.
@@ -75,25 +101,17 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wc := wsconn.New(c)
-	s.mu.Lock()
-	s.conns[wc] = struct{}{}
-	if s.control == nil { // ponytail: first conn wins; stats pause until the next (re)connect if it was a terminal conn
-		s.control = wc
-	}
-	s.mu.Unlock()
+	wc.WS.SetReadLimit(4 << 20) // bounded frames: a buggy/rogue peer must not OOM us
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, wc)
-		if s.control == wc {
-			s.control = nil
-		}
 		s.mu.Unlock()
 		c.Close()
 	}()
 	s.serveConn(wc)
 }
 
-// statsLoop pushes system.stats events to the control connection.
+// statsLoop pushes system.stats events to all connections.
 func (s *Server) statsLoop() {
 	if s.handler.OnStats == nil {
 		return
@@ -107,11 +125,15 @@ func (s *Server) statsLoop() {
 		case <-t.C:
 			stats := s.handler.OnStats()
 			s.mu.Lock()
-			c := s.control
+			conns := make([]*wsconn.Conn, 0, len(s.conns))
+			for c := range s.conns {
+				conns = append(conns, c)
+			}
 			s.mu.Unlock()
-			if c != nil {
-				if err := c.WriteJSON(protocol.NewEvent(MethodSystemStats, stats)); err != nil {
-					c.WS.Close() // let the read loop discover the dead conn
+			evt := protocol.NewEvent(MethodSystemStats, stats)
+			for _, wc := range conns {
+				if err := wc.WriteJSON(evt); err != nil {
+					wc.Close() // let the read loop discover the dead conn
 				}
 			}
 		}
@@ -121,13 +143,17 @@ func (s *Server) statsLoop() {
 // serveConn authenticates the connection, then runs the request loop.
 // Binary frames are raw terminal input for the active session (if any);
 // text frames are JSON envelopes (control plane).
+// readDeadline bounds the read loop between frames; the nodemanager pings
+// every 30s, so 90s catches a half-open conn without killing a slow one.
+const readDeadline = 90 * time.Second
+
 func (s *Server) serveConn(c *wsconn.Conn) {
 	st := &ConnState{}
 	done := make(chan struct{}) // closes when the connection dies; streaming handlers cancel on it
 	defer func() {
 		close(done)
-		if st.term != nil {
-			st.term.Close() // SIGHUP the session's process group, reap via its reaper goroutine
+		if s := st.takeTerm(); s != nil {
+			s.Close() // SIGHUP the session's process group, reap via its reaper goroutine
 		}
 	}()
 	authTimeout := time.Now().Add(10 * time.Second)
@@ -145,20 +171,28 @@ func (s *Server) serveConn(c *wsconn.Conn) {
 		json.Unmarshal(e.Payload, &p)
 		if subtle.ConstantTimeCompare([]byte(p.Token), []byte(s.token)) != 1 {
 			c.WriteJSON(protocol.NewErrorResponse(e.ID, "invalid token"))
-			time.AfterFunc(100*time.Millisecond, func() { c.Close() })
 			return
 		}
 		c.WriteJSON(protocol.NewResponse(e.ID, map[string]string{"status": "ok"}))
 		break
 	}
-	c.SetReadDeadline(time.Time{})
+	s.mu.Lock()
+	s.conns[c] = struct{}{} // only authed conns receive stats events
+	s.mu.Unlock()
+	c.WS.SetPingHandler(func(appData string) error {
+		c.SetReadDeadline(time.Now().Add(readDeadline))
+		return c.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+	})
+	c.SetReadDeadline(time.Now().Add(readDeadline))
 	for {
 		mt, r, err := c.NextReader()
 		if err != nil {
+			slog.Warn("agent ws read failed", "err", err)
 			return
 		}
+		c.SetReadDeadline(time.Now().Add(readDeadline))
 		if mt == websocket.BinaryMessage {
-			if st.term == nil {
+			if st.curTerm() == nil {
 				continue // stray data frame without a session: drop
 			}
 			b, err := io.ReadAll(r)
@@ -166,7 +200,7 @@ func (s *Server) serveConn(c *wsconn.Conn) {
 				return
 			}
 			if len(b) > 0 { // empty-input guard: a 0-byte frame must not hit the pty
-				st.term.Write(b)
+				st.curTerm().Write(b)
 			}
 			continue
 		}
@@ -193,6 +227,5 @@ func (s *Server) Close() {
 		c.Close()
 	}
 	s.conns = map[*wsconn.Conn]struct{}{}
-	s.control = nil
 	s.mu.Unlock()
 }

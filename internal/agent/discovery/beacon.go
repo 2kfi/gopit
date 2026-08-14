@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"syscall"
+	"time"
 
 	"gopit/internal/protocol"
 )
@@ -89,6 +91,7 @@ func (b *Beacon) readLoop(c *net.UDPConn) {
 			case <-b.done:
 				return
 			default:
+				time.Sleep(100 * time.Millisecond) // transient socket errors must not busy-spin
 				continue
 			}
 		}
@@ -100,7 +103,9 @@ func (b *Beacon) readLoop(c *net.UDPConn) {
 		b.mu.Lock()
 		_, err = c.WriteToUDP(reply, addr)
 		b.mu.Unlock()
-		_ = err
+		if err != nil {
+			slog.Warn("beacon reply failed", "addr", addr, "err", err)
+		}
 	}
 }
 

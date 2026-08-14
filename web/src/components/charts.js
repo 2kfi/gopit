@@ -1,5 +1,4 @@
 // charts.js — SVG ring gauge and canvas sparkline, both zero-dependency.
-import { state } from '../main.js'
 
 export function gauge(placeholder, opts = {}) {
   const size = opts.size || 150
@@ -94,8 +93,4 @@ export function fmtBytes(n) {
 
 export function fmtRate(n) {
   return `${fmtBytes(n)}/s`
-}
-
-export function nodeOnline(uuid) {
-  return (state.nodes.find((n) => n.id === uuid) || {}).status === 'online'
 }

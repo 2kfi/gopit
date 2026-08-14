@@ -1,11 +1,11 @@
 package ws
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strings"
 
 	"gopit/internal/agent/docker"
-	"gopit/internal/agent/ufw"
 	"gopit/internal/agent/wsconn"
 	"gopit/internal/protocol"
 )
@@ -15,27 +15,40 @@ type Handler struct {
 	OnStats func() protocol.SystemStats
 	OnInfo  func() protocol.NodeInfo
 	Docker  *docker.API // nil when docker is unavailable
-	Ufw     *ufw.API    // never nil; degrades to "ufw not available" errors
+	FW      fwAPI       // never nil; both backends degrade to clean errors
+	Term    TermConf    // optional session recording
+}
+
+// TermConf configures PTY session recording for this agent.
+type TermConf struct {
+	Record       bool   // write ttyrec files for every terminal session
+	RecordingDir string // base dir; sessions land in <dir>/<node_id>/<ts>.ttyrec
+	NodeID       string // this agent's node UUID (recording subdir)
+}
+
+// fwAPI is the firewall backend behind the ufw.* methods (nftfw or ufw).
+type fwAPI interface {
+	Call(method string, payload json.RawMessage) (any, error)
 }
 
 // Handle processes one request envelope, writing the response with the same id.
 // done closes when the client disconnects; streaming handlers use it to stop.
 func (h *Handler) Handle(c *wsconn.Conn, e protocol.Envelope, done <-chan struct{}, st *ConnState) {
 	switch e.Method {
-	case MethodTerminalOpen:
+	case protocol.MethodTerminalOpen:
 		h.TerminalOpen(c, e, st)
 		return
-	case MethodTerminalResize:
+	case protocol.MethodTerminalResize:
 		h.TerminalResize(c, e, st)
 		return
-	case MethodTerminalClose:
+	case protocol.MethodTerminalClose:
 		h.TerminalClose(c, e, st)
 		return
 	}
-	if h.Ufw != nil {
+	if h.FW != nil {
 		switch e.Method {
-		case MethodUfwStatus, MethodUfwRuleAdd, MethodUfwRuleDel, MethodUfwToggle:
-			payload, err := h.Ufw.Call(e.Method, e.Payload)
+		case MethodUfwStatus, MethodUfwRuleAdd, MethodUfwRuleDel, MethodUfwToggle, MethodUfwPreview:
+			payload, err := h.FW.Call(e.Method, e.Payload)
 			if err != nil {
 				respondErr(c, e.ID, err.Error())
 				return

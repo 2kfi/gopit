@@ -9,7 +9,7 @@ The landing view lists every known node with its status:
 
 | Status | Meaning |
 |:-------|:--------|
-| `pending` | announced itself (or was added manually) but not yet approved — or approved with a token mismatch |
+| `pending` | announced itself (or was added manually) but not yet approved |
 | `approved` | approved by you; the server is dialing / will dial it |
 | `online` | authenticated connection up, stats flowing |
 | `offline` | the control connection dropped or didn't answer |
@@ -20,8 +20,10 @@ predate approval tracking; discovery itself inserts nodes as `pending`.)
 - **Discover** — sends a UDP probe; matching agents announce within ~2s.
 - **Add Node** — manual join for nodes that can't hear broadcasts
   (IP + agent port + token check).
-- **Approve** — pairs the node with the server's `pairing_token`.
-  *Deleting* a node forgets it entirely.
+- **Approve** — if the node has no token yet, the server's `pairing_token`
+  is assigned (agents installed with `TOKEN=<pairing_token>` match already);
+  token mismatch shows as approved-but-offline until you set it via the
+  token endpoint. *Deleting* a node forgets it entirely.
 - **Refresh** — re-polls status.
 - **Name it** — each node gets a display name; it's local to the server DB.
 
@@ -55,10 +57,11 @@ non-interactively (e.g. starting a root-owned service), use the node's
 `ufw` access instead — but `allow_toggle` is off by default.
 
 ### Firewall
-- Current default policy + rule list (parsed from `ufw status`).
+- Current default policy + rule list (kernel netfilter via `firewall: nftfw`
+  by default; `firewall: ufw` legacy mode parses `ufw status`).
 - Add / delete `allow` and `deny` rules (port + optional protocol + comment).
 - Toggle enable/disable — **only visible when the agent config sets
-  `ufw.allow_toggle: true`**, matching the narrow sudoers scope.
+  `ufw.allow_toggle: true`**.
 
 ## Tips
 

@@ -2,14 +2,17 @@
 package agent
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopit/internal/agent/config"
 	"gopit/internal/agent/discovery"
 	dockerd "gopit/internal/agent/docker"
+	"gopit/internal/agent/nftfw"
 	"gopit/internal/agent/system"
 	"gopit/internal/agent/ufw"
 	agentws "gopit/internal/agent/ws"
@@ -17,6 +20,11 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// fwBackend is the firewall implementation behind the ufw.* WS methods.
+type fwBackend interface {
+	Call(method string, payload json.RawMessage) (any, error)
+}
 
 // Agent ties config, beacon and WS server together.
 type Agent struct {
@@ -49,10 +57,31 @@ func New(cfgPath string) (*Agent, error) {
 		slog.Warn("docker unavailable, docker.* methods will error", "err", err)
 		dk = nil // handler answers with a proper error envelope
 	}
-	h := &agentws.Handler{OnStats: col.Stats, OnInfo: func() protocol.NodeInfo { return info }, Docker: dk, Ufw: ufw.New(cfg.Ufw.BinaryPath, cfg.Ufw.AllowToggle)}
+	h := &agentws.Handler{
+		OnStats: col.Stats,
+		OnInfo:  func() protocol.NodeInfo { return info },
+		Docker:  dk,
+		FW:      newFirewall(cfg),
+		Term: agentws.TermConf{
+			Record:       cfg.Terminal.Record,
+			RecordingDir: cfg.Terminal.RecordingDir,
+			NodeID:       id,
+		},
+	}
 	wsSrv := agentws.NewServer(cfg.Token, time.Duration(cfg.StatsIntervalSecs)*time.Second, h)
 	wsSrv.SetTLS(cfg.TLSCert, cfg.TLSKey)
 	return &Agent{cfg: cfg, uuid: id, beacon: beacon, ws: wsSrv, collector: col}, nil
+}
+
+// newFirewall picks the firewall backend from config: nftfw (direct netlink,
+// needs CAP_NET_ADMIN, no sudo) or the legacy ufw sudo integration.
+func newFirewall(cfg *config.Config) fwBackend {
+	if cfg.Firewall == "ufw" {
+		slog.Info("firewall backend: ufw (sudo)")
+		return ufw.New(cfg.Ufw.BinaryPath, cfg.Ufw.AllowToggle)
+	}
+	slog.Info("firewall backend: nftfw (no sudo)")
+	return nftfw.New(cfg.Ufw.AllowToggle)
 }
 
 // Run starts the beacon and WS server, blocking until either fails.
@@ -76,7 +105,7 @@ func (a *Agent) Close() {
 // loadOrCreateUUID reads the persisted node UUID or generates and writes one.
 func loadOrCreateUUID(path string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
-		id := string(b)
+		id := strings.TrimSpace(string(b)) // tolerate a stray trailing newline: identity must survive
 		if _, err := uuid.Parse(id); err == nil {
 			return id, nil
 		}

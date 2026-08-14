@@ -24,6 +24,7 @@ func Dial(n *store.Node, skipTLS bool) (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	ws.SetReadLimit(4 << 20) // a buggy/rogue agent must not stream unbounded data
 	if err := auth(ws, n.Token); err != nil {
 		ws.Close()
 		return nil, &protocol.ErrRemote{Msg: "auth rejected"}
@@ -46,9 +47,10 @@ func dialNode(n *store.Node, dialer websocket.Dialer) (*websocket.Conn, error) {
 
 // auth performs the pre-shared token handshake.
 func auth(ws *websocket.Conn, token string) error {
-	if err := ws.WriteJSON(protocol.NewRequest("auth", struct {
+	req := protocol.NewRequest("auth", struct {
 		Token string `json:"token"`
-	}{Token: token})); err != nil {
+	}{Token: token})
+	if err := ws.WriteJSON(req); err != nil {
 		return err
 	}
 	ws.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -57,7 +59,7 @@ func auth(ws *websocket.Conn, token string) error {
 		return err
 	}
 	ws.SetReadDeadline(time.Time{})
-	if e.Type != protocol.TypeResponse || e.ID == "" || e.Error != nil {
+	if e.Type != protocol.TypeResponse || e.ID != req.ID || e.Error != nil {
 		return &protocol.ErrRemote{Msg: "auth rejected"}
 	}
 	return nil

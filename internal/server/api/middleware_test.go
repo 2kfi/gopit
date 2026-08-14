@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"gopit/internal/server/store"
 )
@@ -20,8 +21,11 @@ func newAuthPair(t *testing.T) (*store.Store, *Auth) {
 }
 
 func TestAuthMiddlewareValidToken(t *testing.T) {
-	_, a := newAuthPair(t)
+	s, a := newAuthPair(t)
 	u := &store.User{ID: 1, Username: "admin"}
+	if _, err := s.CreateUser(u.Username, "hash"); err != nil {
+		t.Fatal(err)
+	}
 	token, err := a.Sign(u)
 	if err != nil {
 		t.Fatal(err)
@@ -77,5 +81,29 @@ func TestAdminOnly(t *testing.T) {
 	})).ServeHTTP(rr, req)
 	if rr.Code != 403 {
 		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestLoginLimiter(t *testing.T) {
+	l := &loginLimiter{limit: 3, window: time.Minute, windowStart: time.Now(), failures: map[string]int{}}
+	ip := "1.2.3.4"
+	for i := 0; i < 3; i++ {
+		l.fail(ip)
+	}
+	if !l.blocked(ip) {
+		t.Fatal("expected IP to be blocked after 3 failures")
+	}
+	if l.blocked("5.6.7.8") {
+		t.Fatal("unrelated IP must not be blocked")
+	}
+	l.reset(ip)
+	if l.blocked(ip) {
+		t.Fatal("reset must clear the failure count")
+	}
+
+	// window expiry unblocks without any explicit reset
+	old := &loginLimiter{limit: 3, window: time.Minute, windowStart: time.Now().Add(-2 * time.Minute), failures: map[string]int{"9.9.9.9": 3}}
+	if old.blocked("9.9.9.9") {
+		t.Fatal("expired window must unblock")
 	}
 }

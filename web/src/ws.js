@@ -11,7 +11,10 @@ export function on(method, fn) {
 let ws = null
 let uuid = null
 let retries = 0
+let opened = false // did onopen ever fire for the current socket
 let closed = false
+let retryTimer = null
+let pingTimer = null
 
 export function connect(nodeUuid) {
   if (ws && uuid === nodeUuid) return
@@ -25,6 +28,14 @@ export function disconnect() {
   closed = true
   retries = 0
   uuid = null
+  if (retryTimer) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  if (pingTimer) {
+    clearInterval(pingTimer)
+    pingTimer = null
+  }
   if (ws) {
     ws.onclose = null
     ws.close()
@@ -34,9 +45,10 @@ export function disconnect() {
 
 function open() {
   if (!uuid || closed) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  ws = new WebSocket(`${proto}://${location.host}/api/nodes/${uuid}/status`)
-  ws.onmessage = (ev) => {
+  opened = false
+  const sock = new WebSocket(`${proto()}${location.host}/api/nodes/${uuid}/status`)
+  ws = sock
+  sock.onmessage = (ev) => {
     let msg
     try {
       msg = JSON.parse(ev.data)
@@ -46,12 +58,33 @@ function open() {
     const fns = handlers.get(msg.method)
     if (fns) for (const fn of fns) fn(msg.payload, msg)
   }
-  ws.onopen = () => (retries = 0)
-  ws.onclose = () => {
-    ws = null
-    if (closed || !uuid) return
+  sock.onopen = () => {
+    opened = true
+    retries = 0
+    // the server treats 60s of silence as a dead browser; ping so idle
+    // dashboards stay live
+    pingTimer = setInterval(() => {
+      if (ws && ws.readyState === 1) ws.send('{}')
+    }, 25000)
+  }
+  sock.onclose = () => {
+    if (pingTimer) {
+      clearInterval(pingTimer)
+      pingTimer = null
+    }
+    if (closed || !uuid || ws !== sock) return
+    if (!opened && retries >= 3) {
+      ws = null
+      console.warn(`status stream for ${uuid}: giving up after failed handshake`)
+      return
+    }
     const delay = Math.min(1000 * 2 ** retries, 30000)
     retries++
-    setTimeout(open, delay)
+    retryTimer = setTimeout(open, delay)
+    if (ws === sock) ws = null
   }
+}
+
+function proto() {
+  return location.protocol === 'https:' ? 'wss://' : 'ws://'
 }

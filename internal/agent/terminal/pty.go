@@ -7,10 +7,12 @@ package terminal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +27,14 @@ var (
 	ErrInvalidUser = errors.New("invalid user")
 	ErrAuthFailed  = errors.New("authentication failed")
 	ErrSuFailed    = errors.New("login validation failed")
+	ErrAgentRoot   = errors.New("agent runs as root; password validation is impossible")
+)
+
+// suPath and getentPath are absolute so a compromised PATH cannot substitute
+// a fake su when validating credentials.
+const (
+	suPath     = "/usr/bin/su"
+	getentPath = "/usr/bin/getent"
 )
 
 const (
@@ -40,6 +50,55 @@ type Session struct {
 	cmd      *exec.Cmd
 	exited   chan struct{}
 	waitOnce sync.Once
+	rec      *Recorder // optional ttyrec recording; nil = not recording
+}
+
+// Recorder writes the pty output stream as a ttyrec file: one record per
+// write, each a 12-byte little-endian header (seconds, microseconds, length)
+// followed by the raw bytes — the format ttyplay(1) reads. A recorder is
+// created once per session and closed with it.
+type Recorder struct {
+	f  *os.File
+	mu sync.Mutex
+}
+
+// NewRecorder creates the per-session file
+// <dir>/<nodeID>/<UTC timestamp>.ttyrec. Callers pass the agent's node ID so
+// files group by node; the agent logs a warning and continues unrecorded
+// when creation fails (e.g. a read-only dir on a rootless agent).
+func NewRecorder(dir, nodeID string) (*Recorder, error) {
+	d := filepath.Join(dir, nodeID)
+	if err := os.MkdirAll(d, 0o750); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(d, time.Now().UTC().Format("20060102T150405Z")+".ttyrec"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	return &Recorder{f: f}, nil
+}
+
+// Write appends one timed record: header + payload.
+func (r *Recorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	var hdr [12]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], uint32(now.Unix()))
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(now.Nanosecond()/1000))
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(len(p)))
+	if _, err := r.f.Write(hdr[:]); err != nil {
+		return 0, err
+	}
+	return r.f.Write(p)
+}
+
+// Close flushes and closes the recording file.
+func (r *Recorder) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.f.Close()
 }
 
 // Open validates the password via su in a PTY, then spawns the real login
@@ -48,7 +107,12 @@ type Session struct {
 // ponytail: the validation pty exists because su reads its prompt from the
 // controlling tty; there is no way to feed a password through stdin, so we
 // spawn su inside a pty and answer the prompt there.
-func Open(user, password string, cols, rows int) (*Session, error) {
+func Open(user, password string, cols, rows int, rec *Recorder) (*Session, error) {
+	if os.Geteuid() == 0 {
+		// su never prompts for a password when run as root, so the
+		// validation below would accept anything — refuse instead.
+		return nil, ErrAgentRoot
+	}
 	uid, shell, err := lookupUser(user)
 	if err != nil {
 		return nil, ErrInvalidUser
@@ -63,6 +127,7 @@ func Open(user, password string, cols, rows int) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.rec = rec
 	if err := s.handshake(password); err != nil {
 		s.Close()
 		return nil, err
@@ -73,7 +138,7 @@ func Open(user, password string, cols, rows int) (*Session, error) {
 // lookupUser resolves a user via getent (one source of truth for existence,
 // uid and login shell; getent predates and outlives any libc NSS quirks).
 func lookupUser(user string) (uid, shell string, err error) {
-	out, err := exec.Command("getent", "passwd", user).Output()
+	out, err := exec.Command(getentPath, "passwd", user).Output()
 	if err != nil {
 		return "", "", err
 	}
@@ -90,7 +155,7 @@ func lookupUser(user string) (uid, shell string, err error) {
 
 // validate answers su's password prompt and checks the exit status.
 func validate(user, password, shell string) error {
-	cmd := exec.Command("su", "-l", user, "-c", "echo ok")
+	cmd := exec.Command(suPath, "-l", user, "-c", "echo ok")
 	cmd.Env = []string{"LC_ALL=C", "TERM=xterm-256color", "SHELL=" + shell}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
 	if err != nil {
@@ -124,6 +189,11 @@ func validate(user, password, shell string) error {
 			break // EOF (su exited), read timeout, or the kill above
 		}
 	}
+	if cmd.ProcessState == nil {
+		// We gave up (no prompt in time, su blocked on /dev/tty): if the
+		// process is still alive, Wait would hang on it forever — kill it.
+		cmd.Process.Kill()
+	}
 	cmd.Wait() // su's pty is closed; the process is dead or about to be
 	return classifySu(fed, authFail, cmd.ProcessState.ExitCode(), out.String())
 }
@@ -134,8 +204,8 @@ func spawn(user, shell string, cols, rows int) (*Session, error) {
 	if user == "root" { // belt and braces: never hand a root shell to a caller
 		return nil, ErrRootUser
 	}
-	cmd := exec.Command("su", "-l", user)
-	cmd.Env = []string{"TERM=xterm-256color", "SHELL=" + shell}
+	cmd := exec.Command(suPath, "-l", user)
+	cmd.Env = []string{"LC_ALL=C", "TERM=xterm-256color", "SHELL=" + shell}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: clampSize(cols, 80), Rows: clampSize(rows, 24)})
 	if err != nil {
 		return nil, errors.New("failed to start shell: " + err.Error())
@@ -227,8 +297,15 @@ func (s *Session) Resize(cols, rows int) error {
 }
 
 // Read/Write forward to the pty master. Read returns after Close with an
-// error, which ends the output pump.
-func (s *Session) Read(p []byte) (int, error)  { return s.ptmx.Read(p) }
+// error, which ends the output pump. Read tees output into the recorder
+// (with timestamps) when recording is enabled.
+func (s *Session) Read(p []byte) (int, error) {
+	n, err := s.ptmx.Read(p)
+	if n > 0 && s.rec != nil {
+		s.rec.Write(p[:n])
+	}
+	return n, err
+}
 func (s *Session) Write(p []byte) (int, error) { return s.ptmx.Write(p) }
 
 // Exited closes when the spawned process has been reaped.
@@ -239,6 +316,9 @@ func (s *Session) Exited() <-chan struct{} { return s.exited }
 // su itself, and the reaper goroutine collects it.
 func (s *Session) Close() error {
 	s.ptmx.Close()
+	if s.rec != nil {
+		s.rec.Close()
+	}
 	if s.cmd.Process != nil {
 		s.cmd.Process.Kill()
 	}

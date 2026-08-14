@@ -13,10 +13,11 @@ To                         Action      From
 [ 4] Anywhere                   REJECT IN   192.168.1.5 on eth0
 [ 5] 8080/tcp (v6)              LIMIT IN    Anywhere (v6)
 [10] 3999/tcp                   ALLOW IN    Anywhere
+[11] 80,443/tcp (Nginx Full)    ALLOW IN    Anywhere (v6)
 `
 	rules := parseNumbered(out)
-	if len(rules) != 6 {
-		t.Fatalf("want 6 rules, got %d: %+v", len(rules), rules)
+	if len(rules) != 7 {
+		t.Fatalf("want 7 rules, got %d: %+v", len(rules), rules)
 	}
 	v4 := rules[0]
 	if v4.Number != 1 || v4.To != "22/tcp" || v4.Action != "ALLOW" || v4.Direction != "IN" || v4.From != "Anywhere" || v4.Interface != "" {
@@ -34,6 +35,9 @@ To                         Action      From
 	}
 	if ten := rules[5]; ten.Number != 10 {
 		t.Fatalf("multi-digit number parsed wrong: %+v", ten)
+	}
+	if prof := rules[6]; prof.To != "80,443/tcp (Nginx Full)" || prof.Action != "ALLOW" || prof.From != "Anywhere" {
+		t.Fatalf("multi-word profile row parsed wrong: %+v", prof)
 	}
 }
 

@@ -4,6 +4,8 @@
 # Exactly ONE mode at a time:
 #   ./install.sh server [--bin <path>] [--url <release-url>] [--port N]
 #   ./install.sh agent   [--bin <path>] [--url <release-url>] [--port N] [--apply-ufw]
+# --apply-ufw installs a ufw default policy; only use it with firewall: ufw in
+# the agent config (the nftfw backend refuses to manage a host ufw owns).
 #
 # Binary source: --bin <file> | --url <download> | build from this repo (run from
 # a checkout with Go installed). TOKEN=secret exports a pairing token; server
@@ -81,7 +83,10 @@ stage_binary() {
       echo "error: no --bin/--url given, and this is not a buildable repo (Makefile + go required)" >&2
       exit 1
     fi
-    make "build-$1" >/dev/null
+    local make_target="build-$1"
+    [[ "$1" == "gopit" ]] && make_target="build-server"
+    [[ "$1" == "gopitd" ]] && make_target="build-agent"
+    make "$make_target" >/dev/null
     install -m 0755 "bin/$1" "$tmp"
   fi
   install -m 0755 "$tmp" "$BIN_PATH"
@@ -117,6 +122,7 @@ install_server() {
     if [[ -z "$PAIRING_TOKEN" ]]; then
       PAIRING_TOKEN=$(openssl rand -hex 16 2>/dev/null || cat /proc/sys/kernel/random/uuid)
     fi
+    [[ -n "$PAIRING_TOKEN" ]] || { echo "error: could not generate a pairing token" >&2; exit 1; }
     local ADMIN_USER ADMIN_PASS
     read -r -p "Dashboard admin username [admin]: " ADMIN_USER
     ADMIN_USER=${ADMIN_USER:-admin}
@@ -160,6 +166,9 @@ Group=$SERVICE_USER
 ExecStart=$BIN_PATH -config $CONFIG
 Restart=always
 RestartSec=5
+# Resource limits: override with GOPIT_MEMORY_MAX / GOPIT_CPU_QUOTA env vars
+MemoryMax=${GOPIT_MEMORY_MAX:-512M}
+CPUQuota=${GOPIT_CPU_QUOTA:-100%}
 ProtectSystem=strict
 ReadWritePaths=$VAR_DIR
 PrivateTmp=yes
@@ -205,6 +214,13 @@ install_agent() {
 
   install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$ETC_DIR"
   install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$TLS_DIR"
+  # the compose deploy dir is a runtime write target (inotify of ProtectSystem)
+  install -d -m 0755 -o "$SERVICE_USER" -g "$SERVICE_USER" /var/lib/gopitd/compose
+  if id docker >/dev/null 2>&1; then
+    usermod -aG docker "$SERVICE_USER" && log "added $SERVICE_USER to the docker group"
+  else
+    warn "no docker group; container management will fail unless the socket is world-readable"
+  fi
   stage_binary gopitd
 
   # --- pairing token -------------------------------------------------------
@@ -229,19 +245,30 @@ install_agent() {
 
   if [[ -f "$TLS_DIR/cert.pem" && -f "$TLS_DIR/key.pem" ]]; then
     log "TLS certs exist; keeping $TLS_DIR/{cert.pem,key.pem}"
-  else
+  elif command -v openssl >/dev/null 2>&1; then
     openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
       -keyout "$TLS_DIR/key.pem" -out "$TLS_DIR/cert.pem" \
       -subj "/CN=$HOSTNAME" \
       -addext "subjectAltName=IP:127.0.0.1,IP:$PRIMARY_IP" \
       >/dev/null 2>&1
-    chown -R root:"$SERVICE_USER" "$TLS_DIR"
-    chmod 0644 "$TLS_DIR/cert.pem"
-    chmod 0640 "$TLS_DIR/key.pem"
-    log "generated self-signed TLS certs (CN=$HOSTNAME, SAN=IP:127.0.0.1,IP:$PRIMARY_IP)"
+    if [[ -f "$TLS_DIR/cert.pem" && -f "$TLS_DIR/key.pem" ]]; then
+      chown -R root:"$SERVICE_USER" "$TLS_DIR"
+      chmod 0644 "$TLS_DIR/cert.pem"
+      chmod 0640 "$TLS_DIR/key.pem"
+      log "generated self-signed TLS certs (CN=$HOSTNAME, SAN=IP:127.0.0.1,IP:$PRIMARY_IP)"
+    else
+      warn "TLS cert generation failed; agent will serve plain ws://"
+      rm -f "$TLS_DIR/cert.pem" "$TLS_DIR/key.pem"
+    fi
+  else
+    warn "openssl not found; agent will serve plain ws://"
   fi
 
   # --- config: write template if missing, else merge the TLS references ----
+  local TLS_LINES=""
+  if [[ -f "$TLS_DIR/cert.pem" && -f "$TLS_DIR/key.pem" ]]; then
+    TLS_LINES=$'tls_cert: '"$TLS_DIR/cert.pem"$'\ntls_key: '"$TLS_DIR/key.pem"
+  fi
   if [[ ! -f "$CONFIG" ]]; then
     cat >"$CONFIG" <<EOF
 listen_addr: 0.0.0.0
@@ -249,8 +276,8 @@ port: $PORT
 token: $TOKEN_VALUE
 uuid_path: $ETC_DIR/node.id
 stats_interval_seconds: 1
-tls_cert: $TLS_DIR/cert.pem
-tls_key: $TLS_DIR/key.pem
+$TLS_LINES
+firewall: nftfw
 ufw:
   binary_path: /usr/sbin/ufw
   allow_toggle: false
@@ -259,8 +286,8 @@ EOF
     chmod 0640 "$CONFIG"
     log "wrote $CONFIG"
   else
-    [[ -f "$CONFIG" ]] && ! grep -q '^tls_cert:' "$CONFIG" \
-      && printf 'tls_cert: %s\ntls_key: %s\n' "$TLS_DIR/cert.pem" "$TLS_DIR/key.pem" >>"$CONFIG"
+    [[ -f "$CONFIG" ]] && [[ -n "$TLS_LINES" ]] && ! grep -q '^tls_cert:' "$CONFIG" \
+      && printf '%s\n' "$TLS_LINES" >>"$CONFIG"
     chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG" 2>/dev/null || true
     chmod 0640 "$CONFIG" 2>/dev/null || true
     warn "existing $CONFIG kept; appended tls_cert/tls_key if they were missing"
@@ -272,7 +299,7 @@ EOF
   else
     cat >"$SUDOERS" <<EOF
 # gopit agent: ufw operations only (no blanket root)
-$SERVICE_USER ALL=(root) NOPASSWD: /usr/sbin/ufw status*, /usr/sbin/ufw allow*, /usr/sbin/ufw delete*, /usr/sbin/ufw default*, /usr/sbin/ufw enable, /usr/sbin/ufw disable
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/sbin/ufw status*, /usr/sbin/ufw allow*, /usr/sbin/ufw deny*, /usr/sbin/ufw reject*, /usr/sbin/ufw --force delete*, /usr/sbin/ufw --force enable, /usr/sbin/ufw default*, /usr/sbin/ufw disable
 EOF
     chmod 0440 "$SUDOERS"
     visudo -cf "$SUDOERS" >/dev/null
@@ -294,10 +321,16 @@ Group=$SERVICE_USER
 ExecStart=$BIN_PATH -config $CONFIG
 Restart=always
 RestartSec=5
-# NoNewPrivileges=yes is intentionally NOT set: ufw integration runs sudo -n.
+# Resource limits: override with GOPIT_MEMORY_MAX / GOPIT_CPU_QUOTA env vars
+MemoryMax=${GOPIT_MEMORY_MAX:-512M}
+CPUQuota=${GOPIT_CPU_QUOTA:-100%}
+# NoNewPrivileges=yes is intentionally NOT set: firewall management runs via
+# nftfw (CAP_NET_ADMIN) or, in legacy mode, sudo -n ufw.
 ProtectSystem=strict
-ReadWritePaths=$ETC_DIR
+ReadWritePaths=$ETC_DIR /var/lib/gopitd /etc/nftables.conf
 PrivateTmp=yes
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target
@@ -306,7 +339,7 @@ EOF
     log "installed $SERVICE"
   fi
 
-  # --- default firewall policy (only with --apply-ufw) ---------------------
+  # --- default firewall policy (only with --apply-ufw; ufw backend) ------
   if [[ "$UFW_APPLY" == "1" ]]; then
     if command -v ufw >/dev/null 2>&1 || [[ -x /usr/sbin/ufw ]]; then
       ufw default deny incoming

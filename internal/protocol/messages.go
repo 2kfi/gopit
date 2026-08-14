@@ -23,6 +23,14 @@ const (
 	TypeEvent    = "event"
 )
 
+// Terminal methods.
+const (
+	MethodTerminalOpen   = "terminal.open"
+	MethodTerminalResize = "terminal.resize"
+	MethodTerminalClose  = "terminal.close"
+	MethodTerminalExit   = "terminal.exit"
+)
+
 // NewRequest builds a request envelope with a fresh UUID.
 func NewRequest(method string, payload any) Envelope {
 	return Envelope{

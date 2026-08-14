@@ -19,6 +19,7 @@ const (
 	MethodDockerVolumesList       = "docker.volumes.list"
 	MethodDockerVolumeRemove      = "docker.volume.remove"
 	MethodDockerComposeList       = "docker.compose.list"
+	MethodDockerComposeValidate   = "docker.compose.validate"
 	MethodDockerComposeDeploy     = "docker.compose.deploy"
 	MethodDockerComposeDown       = "docker.compose.down"
 	MethodDockerComposePS         = "docker.compose.ps"
@@ -27,13 +28,7 @@ const (
 	MethodUfwRuleAdd = "ufw.rule.add"
 	MethodUfwRuleDel = "ufw.rule.delete"
 	MethodUfwToggle  = "ufw.toggle"
-
-	// Terminal control plane (JSON envelopes; payload data flows as raw
-	// binary frames on the same connection).
-	MethodTerminalOpen   = "terminal.open"
-	MethodTerminalResize = "terminal.resize"
-	MethodTerminalClose  = "terminal.close"
-	MethodTerminalExit   = "terminal.exit" // event: session shell has exited
+	MethodUfwPreview = "ufw.rule.preview"
 )
 
 // AuthPayload is the token handshake request body.

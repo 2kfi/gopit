@@ -25,8 +25,11 @@ import (
 
 // API serves the docker.* WS methods.
 type API struct {
-	cli     *client.Client
-	mu      sync.Mutex
+	cli *client.Client
+	mu  sync.Mutex
+	// streams holds one log follow per container (restart wins). A second
+	// viewer of the same container cancels the first: this is a deliberate
+	// single-subscriber design for a monitoring tool, not a bug.
 	streams map[string]*logStream // containerID -> stream, one follow per container
 }
 
@@ -206,9 +209,13 @@ func (a *API) listContainers(ctx context.Context) (any, error) {
 	}
 	out := make([]ContainerSummary, 0, len(list))
 	for _, c := range list {
+		name := c.ID
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
 		out = append(out, ContainerSummary{
 			ID:      c.ID,
-			Name:    strings.TrimPrefix(c.Names[0], "/"),
+			Name:    name,
 			Image:   c.Image,
 			State:   c.State,
 			Status:  c.Status,
@@ -270,7 +277,7 @@ func (a *API) StreamLogs(c *wsconn.Conn, e protocol.Envelope, done <-chan struct
 			}
 			writeEnv(c, protocol.NewEvent(MethodLogsEnd, p))
 		}()
-		rc, err := a.cli.ContainerLogs(ctx, req.ContainerID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true})
+		rc, err := a.cli.ContainerLogs(ctx, req.ContainerID, container.LogsOptions{ShowStdout: true, ShowStderr: true, Follow: true, Tail: "200"})
 		if err != nil {
 			errMsg = err.Error()
 			return
@@ -322,6 +329,10 @@ func (w *lineWriter) Write(p []byte) (int, error) {
 		i := indexByte(p, '\n')
 		if i < 0 {
 			w.buf = append(w.buf, p...)
+			if len(w.buf) > 64<<10 { // a stream without newlines must not grow unbounded
+				w.emit(string(w.buf))
+				w.buf = w.buf[:0]
+			}
 			return len(p), nil
 		}
 		w.buf = append(w.buf, p[:i]...)

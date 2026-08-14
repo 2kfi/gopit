@@ -5,6 +5,8 @@ import { esc } from '../util.js'
 
 const actionColor = { ALLOW: 'ok', DENY: 'bad', REJECT: 'warn', LIMIT: 'warn' }
 
+const CONFIG_DOCS_URL = 'https://github.com/2kfi/gopit/blob/main/docs/configuration.md'
+
 export function firewallView({ uuid }) {
   const node = state.nodes.find((n) => n.id === uuid) || {}
   const el = document.createElement('div')
@@ -52,9 +54,17 @@ export function firewallView({ uuid }) {
             <input name="from" value="any" spellcheck="false"></label>
           <label>Interface (optional)
             <input name="interface" placeholder="eth0" spellcheck="false"></label>
+          <button class="btn" type="button" id="rule-preview">Preview</button>
           <button class="btn btn-primary" id="rule-add">Add rule</button>
         </form>
         <p class="form-error" id="rule-error"></p>
+        <div class="hidden" id="preview-wrap">
+          <div class="term-bar"><span></span><span></span><span></span>preview: state after applying this rule</div>
+          <table class="table">
+            <thead><tr><th>#</th><th>To</th><th>Action</th><th>From</th><th>Dir</th><th>Iface</th></tr></thead>
+            <tbody id="rows-preview"></tbody>
+          </table>
+        </div>
       </div>
     </section>
   `
@@ -129,7 +139,14 @@ export function firewallView({ uuid }) {
         await api.post(`/api/nodes/${uuid}/firewall/toggle`, { enabled: target })
         await load()
       } catch (err) {
-        flash(err.message) // e.g. "toggle disabled by config" from the agent
+        if (err.message.includes('toggle disabled')) {
+          flashEl.innerHTML = `${esc(err.message)} — enable <code>ufw.allow_toggle</code> in the agent config (<code>/etc/gopitd/gopitd.yaml</code>) →
+            <a href="${CONFIG_DOCS_URL}" target="_blank" rel="noopener">docs</a>`
+          flashEl.style.opacity = 1
+          setTimeout(() => (flashEl.style.opacity = 0), 6000)
+        } else {
+          flash(err.message)
+        }
       } finally {
         btn.disabled = false
       }
@@ -138,27 +155,69 @@ export function firewallView({ uuid }) {
 
   const form = el.querySelector('#rule-form')
   const errEl = el.querySelector('#rule-error')
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault()
-    errEl.textContent = ''
+  const previewWrap = el.querySelector('#preview-wrap')
+  const formData = () => {
     const f = new FormData(form)
     const port = Number(f.get('port'))
     if (!port || port < 1 || port > 65535) {
       errEl.textContent = 'Port must be a number between 1 and 65535.'
+      return null
+    }
+    return {
+      protocol: f.get('protocol'),
+      port,
+      action: f.get('action'),
+      from: f.get('from').trim() || 'any',
+      interface: f.get('interface').trim(),
+    }
+  }
+  const renderPreview = (st) => {
+    const rows = el.querySelector('#rows-preview')
+    rows.innerHTML = ''
+    if (!st.rules || st.rules.length === 0) {
+      rows.innerHTML = `<tr><td colspan="6" class="empty">No rules.</td></tr>`
       return
     }
+    for (const [i, r] of st.rules.entries()) {
+      const tr = document.createElement('tr')
+      const isNew = i === st.rules.length - 1
+      tr.innerHTML = `
+        <td class="mono dim">${esc(r.number)}</td>
+        <td class="mono">${esc(r.to)}</td>
+        <td><span class="badge badge-${actionColor[r.action] || 'dim'}">${esc(r.action)}</span></td>
+        <td class="mono dim">${esc(r.from)}</td>
+        <td class="mono dim">${esc(r.direction)}</td>
+        <td class="mono dim">${esc(r.interface || '—')}${isNew ? ' <span class="badge badge-ok">new</span>' : ''}</td>`
+      rows.appendChild(tr)
+    }
+    previewWrap.classList.remove('hidden')
+  }
+  el.querySelector('#rule-preview').addEventListener('click', async () => {
+    const body = formData()
+    if (!body) return
+    errEl.textContent = ''
+    const btn = el.querySelector('#rule-preview')
+    btn.disabled = true
+    try {
+      renderPreview(await api.post(`/api/nodes/${uuid}/firewall/preview`, body))
+    } catch (err) {
+      errEl.textContent = err.message
+    } finally {
+      btn.disabled = false
+    }
+  })
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    errEl.textContent = ''
+    const body = formData()
+    if (!body) return
     const addBtn = el.querySelector('#rule-add')
     addBtn.disabled = true
     try {
-      await api.post(`/api/nodes/${uuid}/firewall/rules`, {
-        protocol: f.get('protocol'),
-        port,
-        action: f.get('action'),
-        from: f.get('from').trim() || 'any',
-        interface: f.get('interface').trim(),
-      })
+      await api.post(`/api/nodes/${uuid}/firewall/rules`, body)
       form.reset()
       form.elements.from.value = 'any'
+      previewWrap.classList.add('hidden')
       await load()
     } catch (err) {
       errEl.textContent = err.message

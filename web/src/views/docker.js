@@ -5,7 +5,7 @@ import { nodeTabs } from '../components/node-tabs.js'
 import { esc } from '../util.js'
 
 const badge = (s) => {
-  const color = /^(running|up|running\()/.test(s) ? 'ok' : /^(exited|dead|stopped)/.test(s) ? 'bad' : 'warn'
+  const color = /^(running|up|running\()/i.test(s) ? 'ok' : /^(exited|dead|stopped)/i.test(s) ? 'bad' : 'warn'
   return `<span class="badge badge-${color}">${esc(s)}</span>`
 }
 
@@ -15,7 +15,7 @@ const fmtPorts = (ports) =>
     .map((p) => `${p.ip || ''}${p.ip ? ':' : ''}${p.public_port}->${p.private_port}/${p.type}`)
     .join(', ') || '—'
 
-const fmtCreated = (c) => (c ? new Date(c * 1000).toLocaleString() : '—')
+const fmtCreated = (c) => (c ? new Date(typeof c === 'number' ? c * 1000 : c).toLocaleString() : '—')
 
 export function dockerView({ uuid }) {
   const node = state.nodes.find((n) => n.id === uuid) || {}
@@ -91,6 +91,7 @@ export function dockerView({ uuid }) {
         <pre class="log-out log-out-sm hidden" id="deploy-out"></pre>
         <div class="dialog-actions">
           <button class="btn" type="button" id="deploy-cancel">Cancel</button>
+          <button class="btn" type="button" id="deploy-validate">Validate YAML</button>
           <button class="btn btn-primary" id="deploy-go">Deploy</button>
         </div>
       </form>
@@ -164,7 +165,7 @@ export function dockerView({ uuid }) {
     for (const im of list) {
       const tr = document.createElement('tr')
       tr.innerHTML = `
-        <td class="mono">${esc((im.repo_tags && im.repo_tags.join(', ')) || '<span class="dim">&lt;none&gt;</span>')}</td>
+        <td class="mono">${(im.repo_tags && im.repo_tags.length) ? esc(im.repo_tags.join(', ')) : '<span class="dim">&lt;none&gt;</span>'}</td>
         <td class="mono dim">${esc(im.id.slice(7, 19))}</td>
         <td class="mono dim">${esc(fmtBytes(im.size))}</td>
         <td class="mono dim">${esc(fmtCreated(im.created))}</td>
@@ -274,6 +275,11 @@ export function dockerView({ uuid }) {
   }
 
   const openLogs = (c) => {
+    if (logWS) {
+      logWS.onclose = null
+      logWS.close()
+      logWS = null
+    }
     logOut.textContent = ''
     el.querySelector('#log-title').textContent = c.name
     logState.textContent = 'streaming…'
@@ -281,6 +287,7 @@ export function dockerView({ uuid }) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const ws = new WebSocket(`${proto}://${location.host}/api/nodes/${uuid}/containers/${c.id}/logs`)
     logWS = ws
+    let ended = false
     ws.onmessage = (ev) => {
       let m
       try {
@@ -297,11 +304,16 @@ export function dockerView({ uuid }) {
         logOut.textContent += m.payload.line + '\n'
         logOut.scrollTop = logOut.scrollHeight
       } else if (m.method === 'docker.container.logs.end') {
+        ended = true
         if (m.payload.error) logOut.textContent += `✖ stream ended: ${m.payload.error}\n`
         logState.textContent = 'stream ended'
       }
     }
     ws.onerror = () => (logState.textContent = 'connection failed')
+    ws.onclose = () => {
+      // normal end arrives as logs.end before the server closes the socket
+      if (!ended) logState.textContent = 'connection failed'
+    }
   }
   logDialog.addEventListener('close', closeLogs)
   el.querySelector('#log-close').addEventListener('click', closeLogs)
@@ -310,32 +322,62 @@ export function dockerView({ uuid }) {
   // ---- deploy stack ----
   const deployDialog = el.querySelector('#deploy-dialog')
   const deployOut = el.querySelector('#deploy-out')
+  const deployError = el.querySelector('#deploy-error')
+  const deployForm = deployDialog.querySelector('form')
   deployDialog.querySelector('#deploy-cancel').addEventListener('click', () => deployDialog.close())
   el.querySelector('#btn-deploy').addEventListener('click', () => {
     deployOut.classList.add('hidden')
     deployOut.textContent = ''
-    el.querySelector('#deploy-error').textContent = ''
+    deployError.textContent = ''
     deployDialog.showModal()
   })
-  deployDialog.querySelector('form').addEventListener('submit', async (e) => {
-    e.preventDefault()
-    const f = new FormData(e.currentTarget)
+  const deployInputs = () => {
+    const f = new FormData(deployForm)
     const name = f.get('name').trim()
     const yaml = f.get('yaml')
     if (!name || !yaml) {
-      el.querySelector('#deploy-error').textContent = 'Name and YAML are required'
-      return
+      deployError.textContent = 'Name and YAML are required'
+      return null
     }
+    return { name, yaml }
+  }
+  deployDialog.querySelector('#deploy-validate').addEventListener('click', async (e) => {
+    const input = deployInputs()
+    if (!input) return
+    const btn = e.currentTarget
+    btn.disabled = true
+    try {
+      const res = await api.post(`/api/nodes/${uuid}/compose/validate`, input)
+      const svcs = res.services || []
+      const nets = res.networks || []
+      const vols = res.volumes || []
+      deployOut.classList.remove('hidden')
+      deployOut.textContent = `✔ valid — ${svcs.length} service(s), ${nets.length} network(s), ${vols.length} volume(s)` + svcs
+        .map((s) => `\n  ${s.name}${s.image ? ' (' + s.image + ')' : ''}${s.ports && s.ports.length ? ' — ' + s.ports.join(', ') : ''}`)
+        .join('')
+      if (nets.length) deployOut.textContent += `\nnetworks: ${nets.join(', ')}`
+      if (vols.length) deployOut.textContent += `\nvolumes: ${vols.join(', ')}`
+      deployError.textContent = ''
+    } catch (err) {
+      deployError.textContent = err.message
+    } finally {
+      btn.disabled = false
+    }
+  })
+  deployForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    const input = deployInputs()
+    if (!input) return
     const go = el.querySelector('#deploy-go')
     go.disabled = true
     try {
-      const res = await api.post(`/api/nodes/${uuid}/compose/deploy`, { name, yaml })
+      const res = await api.post(`/api/nodes/${uuid}/compose/deploy`, input)
       deployOut.classList.remove('hidden')
       deployOut.textContent = res.output || 'deployed'
       deployOut.scrollTop = deployOut.scrollHeight
       await loadStacks()
     } catch (err) {
-      el.querySelector('#deploy-error').textContent = err.message
+      deployError.textContent = err.message
     } finally {
       go.disabled = false
     }

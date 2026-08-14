@@ -4,6 +4,7 @@ package system
 import (
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,8 +27,9 @@ type Collector struct {
 	lastAt  time.Time
 }
 
-// NewCollector returns a ready collector.
-func NewCollector() *Collector { return &Collector{lastAt: time.Now()} }
+// NewCollector returns a ready collector. lastAt stays zero until the first
+// Stats call so the first delta is skipped (see Stats).
+func NewCollector() *Collector { return &Collector{} }
 
 // Info returns static node information. Port is filled by the caller.
 func (c *Collector) Info(port int) protocol.NodeInfo {
@@ -81,11 +83,20 @@ func (c *Collector) Stats() protocol.SystemStats {
 	var rx, tx, rxPerSec, txPerSec uint64
 	if counters, err := psnet.IOCounters(false); err == nil && len(counters) > 0 {
 		rx, tx = counters[0].BytesRecv, counters[0].BytesSent
-		dt := now.Sub(c.lastAt).Seconds()
 		c.mu.Lock()
-		if dt > 0 && !c.lastAt.IsZero() {
-			rxPerSec = uint64(float64(rx-c.lastNet.BytesRecv) / dt)
-			txPerSec = uint64(float64(tx-c.lastNet.BytesSent) / dt)
+		dt := now.Sub(c.lastAt).Seconds()
+		// lastAt is zero until the first sample: the first delta is skipped,
+		// otherwise (since-boot counters / tiny dt) reads as a huge spike.
+		if !c.lastAt.IsZero() && dt > 0 {
+			// monotonic guard: an interface reset makes the counter go
+			// backwards; report 0 for that sample instead of a phantom rate.
+			prev := c.lastNet
+			if rx >= prev.BytesRecv {
+				rxPerSec = uint64(float64(rx-prev.BytesRecv) / dt)
+			}
+			if tx >= prev.BytesSent {
+				txPerSec = uint64(float64(tx-prev.BytesSent) / dt)
+			}
 		}
 		c.lastNet, c.lastAt = counters[0], now
 		c.mu.Unlock()
@@ -100,8 +111,33 @@ func (c *Collector) Stats() protocol.SystemStats {
 }
 
 // firstOutboundIP returns the first non-loopback IPv4 of this host, or "".
+// Virtual bridge/container interfaces (docker0, br-*, veth*, ...) are skipped
+// so the reported IP is the host's real address; if none match, any
+// non-loopback IPv4 is accepted as a fallback.
 func firstOutboundIP() string {
-	addrs, err := net.InterfaceAddrs()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, i := range ifaces {
+		if isVirtualIface(i.Name) {
+			continue
+		}
+		if ip := ifaceIPv4(i); ip != "" {
+			return ip
+		}
+	}
+	// Fallback: no physical-looking interface found; take any non-loopback.
+	for _, i := range ifaces {
+		if ip := ifaceIPv4(i); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func ifaceIPv4(i net.Interface) string {
+	addrs, err := i.Addrs()
 	if err != nil {
 		return ""
 	}
@@ -113,4 +149,15 @@ func firstOutboundIP() string {
 		return ip.String()
 	}
 	return ""
+}
+
+// isVirtualIface reports whether a network interface is a container/bridge
+// construct rather than a physical or primary host interface.
+func isVirtualIface(name string) bool {
+	for _, prefix := range []string{"docker", "br-", "veth", "virbr", "lxc", "lxd"} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }

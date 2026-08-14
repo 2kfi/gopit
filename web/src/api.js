@@ -15,6 +15,10 @@ async function request(method, path, body) {
     }
     throw err
   }
+  // a 200 that isn't JSON means we hit the SPA fallback, not the API
+  if (Object.keys(data).length === 0 && (res.headers.get('content-type') || '').includes('text/html')) {
+    throw new Error(`API not found: ${path}`)
+  }
   return data
 }
 

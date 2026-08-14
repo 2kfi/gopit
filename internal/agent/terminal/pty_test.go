@@ -1,7 +1,10 @@
 package terminal
 
 import (
+	"encoding/binary"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -35,6 +38,39 @@ func TestClassifySu(t *testing.T) {
 				t.Fatalf("classifySu = nil, want %v", tt.want)
 			}
 		})
+	}
+}
+
+// TestRecorderWritesTTYrecFormat proves the recorder emits the ttyrec wire
+// format: 3 little-endian u32 header fields (sec, usec, len) per payload.
+func TestRecorderWritesTTYrecFormat(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir, "node-1")
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	payload := []byte("hello\r\n")
+	if _, err := r.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+
+	matches, err := filepath.Glob(filepath.Join(dir, "node-1", "*.ttyrec"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("expected one recording file, got %v (%v)", matches, err)
+	}
+	b, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 12+len(payload) {
+		t.Fatalf("file must be one 12-byte header + payload, got %d bytes", len(b))
+	}
+	if n := binary.LittleEndian.Uint32(b[8:12]); int(n) != len(payload) {
+		t.Fatalf("header length = %d, want %d", n, len(payload))
+	}
+	if string(b[12:]) != string(payload) {
+		t.Fatalf("payload mismatch: %q", b[12:])
 	}
 }
 

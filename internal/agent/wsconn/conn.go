@@ -14,6 +14,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// writeTimeout bounds every write: a client that stops reading must not
+// wedge a writer goroutine (e.g. the stats loop) indefinitely.
+const writeTimeout = 5 * time.Second
+
 // Conn is a gorilla connection safe for concurrent writers.
 type Conn struct {
 	WS *websocket.Conn
@@ -27,6 +31,7 @@ func New(ws *websocket.Conn) *Conn { return &Conn{WS: ws} }
 func (c *Conn) WriteJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.WS.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.WS.WriteJSON(v)
 }
 
@@ -34,6 +39,7 @@ func (c *Conn) WriteJSON(v any) error {
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.WS.SetWriteDeadline(time.Now().Add(writeTimeout))
 	return c.WS.WriteMessage(messageType, data)
 }
 

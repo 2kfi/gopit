@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -41,6 +42,8 @@ func (a *StatusAPI) Stream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	defer TrackWS(ws)()
+	ws.SetReadLimit(4 << 20) // bounded browser frames, matches the agent-side limit
 	sub := make(chan protocol.Envelope, 128)
 	conn.Subscribe(sub)
 	defer conn.Unsubscribe(sub)
@@ -48,6 +51,9 @@ func (a *StatusAPI) Stream(w http.ResponseWriter, r *http.Request) {
 	ping := make(chan struct{})
 	go func() {
 		for {
+			// liveness: the browser pings every 25s; silence past 60s means
+			// a half-open conn — stop relaying (and free the subscription).
+			ws.SetReadDeadline(time.Now().Add(60 * time.Second))
 			if _, _, err := ws.ReadMessage(); err != nil {
 				close(ping)
 				return
@@ -60,6 +66,11 @@ func (a *StatusAPI) Stream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				ws.Close()
 				return
+			}
+			// only the stats broadcast belongs here; responses/events of
+			// other sessions (docker inspect, terminal exit) must not leak.
+			if e.Method != "system.stats" {
+				continue
 			}
 			if err := ws.WriteJSON(e); err != nil {
 				ws.Close()

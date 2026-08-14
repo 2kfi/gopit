@@ -52,7 +52,7 @@ What it does:
 4. generates self-signed TLS certificates into `/etc/gopitd/tls/`
    (10 years, `CN=hostname`, SAN covers loopback + primary IP) — the server
    dials the agent over `wss://` automatically
-5. writes `/etc/sudoers.d/gopit-gopitd` — see [Security](security.md)
+5. writes `/etc/sudoers.d/gopit-node-agent` — see [Security](security.md)
    for the exact scope
 6. installs and starts `gopitd.service`
 7. `--apply-ufw` applies: `default deny incoming`, `default allow outgoing`,
@@ -94,7 +94,7 @@ Both binaries only need `-config <path>`; default config paths are the
 ```bash
 systemctl disable --now gopitd       # per node
 rm /etc/systemd/system/gopitd.service
-rm -r /etc/gopitd /usr/local/bin/gopitd /etc/sudoers.d/gopit-gopitd
+rm -r /etc/gopitd /usr/local/bin/gopitd /etc/sudoers.d/gopit-node-agent
 userdel gopitd
 
 systemctl disable --now gopit      # on the management machine

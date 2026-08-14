@@ -3,6 +3,7 @@ import './styles.css'
 
 import { loginView } from './views/login.js'
 import { nodesView } from './views/nodes.js'
+import { wizardView } from './views/wizard.js'
 import { dashboardView } from './views/dashboard.js'
 import { dockerView } from './views/docker.js'
 import { firewallView } from './views/firewall.js'
@@ -11,6 +12,7 @@ import { sidebar } from './components/sidebar.js'
 
 const routes = [
   { re: /^\/login$/, view: loginView },
+  { re: /^\/wizard$/, view: wizardView },
   { re: /^\/nodes$/, view: nodesView },
   { re: /^\/node\/([^/]+)\/dashboard$/, view: dashboardView, params: ['uuid'] },
   { re: /^\/node\/([^/]+)\/docker$/, view: dockerView, params: ['uuid'] },
@@ -53,8 +55,20 @@ async function render() {
     navigate('#/nodes')
     return
   }
-  const sb = sidebar(state.user, state.nodes)
-  app.appendChild(sb.el)
+  // First-run wizard: no sidebar, full-screen onboarding.
+  const isWizard = location.hash === '#/wizard'
+  if (state.wizardDone && isWizard) {
+    navigate('#/nodes')
+    return
+  }
+  if (!state.wizardDone && !isWizard && location.hash !== '#/login') {
+    navigate('#/wizard')
+    return
+  }
+  if (!isWizard) {
+    const sb = sidebar(state.user, state.nodes)
+    app.appendChild(sb.el)
+  }
   const main = document.createElement('main')
   main.className = 'content'
   app.appendChild(main)
@@ -68,6 +82,7 @@ async function render() {
 export const state = {
   user: null,
   nodes: [],
+  wizardDone: false,
   setUser(u) {
     state.user = u
     render()
@@ -75,14 +90,27 @@ export const state = {
   setNodes(n) {
     state.nodes = n
   },
+  setWizardDone(d) {
+    state.wizardDone = d
+    render()
+  },
 }
 
 async function boot() {
   window.addEventListener('hashchange', render)
   try {
-    const nodes = await api.get('/nodes')
-    state.setUser({ username: 'admin' })
-    state.setNodes(nodes)
+    const me = await api.get('/api/me')
+    state.setUser(me)
+    try {
+      state.setNodes(await api.get('/api/nodes'))
+    } catch {
+      // transient node-list failure — sidebar polls refresh it; not a logout
+    }
+    try {
+      state.wizardDone = !!(await api.get('/api/wizard')).done
+    } catch {
+      // wizard status can't be read; the wizard view polls and self-heals
+    }
   } catch (err) {
     state.setUser(null)
     if (location.hash !== '#/login') navigate('#/login')

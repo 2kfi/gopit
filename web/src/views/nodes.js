@@ -1,6 +1,6 @@
 import { api } from '../api.js'
 import { state, navigate } from '../main.js'
-import { esc } from '../util.js'
+import { esc, maskToken, copyButton } from '../util.js'
 
 const STATUS_COLORS = {
   online: 'ok',
@@ -36,7 +36,7 @@ function nodeRow(n) {
     btn.addEventListener('click', async () => {
       btn.disabled = true
       try {
-        await api.post(`/nodes/${n.id}/approve`)
+        await api.post(`/api/nodes/${n.id}/approve`)
         await refresh()
       } catch (err) {
         if (err.status === 400) openTokenDialog(n.id, err.message)
@@ -56,6 +56,7 @@ function actionsFor(n) {
 
 let tableBody
 let flashEl
+let broadcast = true // cached wizard broadcast capability; refresh() reads it
 
 // Pairing dialog: discovered nodes carry no token (the server no longer hands
 // the fleet token to UDP announcers), so the operator pastes the node's agent
@@ -84,13 +85,15 @@ function flash(msg) {
 
 export async function refresh() {
   if (!tableBody) return
-  const nodes = await api.get('/nodes')
+  const nodes = await api.get('/api/nodes')
   state.setNodes(nodes)
   tableBody.innerHTML = ''
   if (nodes.length === 0) {
     tableBody.innerHTML = `
       <tr><td colspan="6" class="empty">
-        No nodes yet. Hit <strong>Discover</strong> to scan the network, or add one manually.
+        No nodes yet. Discovery uses UDP broadcast — nodes must be on the same L2 segment.
+        For remote nodes, use <strong>Manual Add</strong>.${broadcast ? '' : `
+        <span class="block dim">No non-loopback interface detected on this host — broadcast discovery will not reach other machines.</span>`}
       </td></tr>`
     return
   }
@@ -106,11 +109,20 @@ export function nodesView() {
         <p class="sub">Machines running gopitd. Approve them to start streaming metrics.</p>
       </div>
       <div class="head-actions">
-        <button class="btn" id="add-node">Add node</button>
-        <button class="btn btn-primary" id="discover">Discover</button>
+        <button class="btn btn-primary" id="add-node">Add node</button>
       </div>
     </header>
     <div class="flash" id="flash"></div>
+
+    <div class="panel terminal pair-panel">
+      <div class="term-bar"><span></span><span></span><span></span>pairing token</div>
+      <div class="pair-row">
+        <code class="tok" id="pair-token">…</code>
+        <button class="btn btn-sm" id="pair-show" hidden>Show</button>
+        <span class="pair-note dim" id="pair-note"></span>
+      </div>
+    </div>
+
     <div class="panel terminal">
       <div class="term-bar"><span></span><span></span><span></span>gopit / nodes</div>
       <table class="table">
@@ -120,18 +132,34 @@ export function nodesView() {
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <dialog id="add-dialog" class="dialog">
-      <form method="dialog" class="dialog-body">
+
+    <dialog id="add-dialog" class="dialog dialog-lg">
+      <div class="dialog-body">
         <h2>Add node</h2>
-        <label>IP <input name="ip" required placeholder="10.0.0.5"></label>
-        <label>Port <input name="port" type="number" value="1221" required></label>
-        <label>Hostname <input name="hostname" placeholder="optional"></label>
-        <label>Token <input name="token" required placeholder="agent pairing token"></label>
-        <div class="dialog-actions">
-          <button class="btn" value="cancel">Cancel</button>
-          <button class="btn btn-primary" value="add">Add</button>
+        <div class="tabs" id="add-tabs">
+          <button class="tab active" data-tab="scan">Scan Network</button>
+          <button class="tab" data-tab="manual">Manual IP</button>
         </div>
-      </form>
+        <section id="add-scan">
+          <p class="hint" id="add-bcast-hint" hidden></p>
+          <div class="row">
+            <button class="btn btn-primary" id="add-scan-go">Scan network</button>
+            <span class="dim" id="add-scan-result"></span>
+          </div>
+        </section>
+        <section id="add-manual" class="hidden">
+          <form id="manual-form">
+            <label>IP <input name="ip" required placeholder="10.0.0.5"></label>
+            <label>Port <input name="port" type="number" value="1221" required></label>
+            <label>Hostname <input name="hostname" placeholder="optional"></label>
+            <label>Token <input name="token" required placeholder="agent pairing token"></label>
+            <div class="dialog-actions">
+              <button class="btn" type="button" id="add-cancel">Cancel</button>
+              <button class="btn btn-primary" type="submit">Add</button>
+            </div>
+          </form>
+        </section>
+      </div>
     </dialog>
     <dialog id="token-dialog" class="dialog">
       <form class="dialog-body">
@@ -151,7 +179,7 @@ export function nodesView() {
   tableBody = el.querySelector('#rows')
   flashEl = el.querySelector('#flash')
 
-  const dialog = el.querySelector('#add-dialog')
+  const addDialog = el.querySelector('#add-dialog')
   tokenDialog = el.querySelector('#token-dialog')
   tokenDialog.querySelector('#token-cancel').addEventListener('click', () => tokenDialog.close())
   tokenDialog.querySelector('form').addEventListener('submit', async (e) => {
@@ -164,8 +192,8 @@ export function nodesView() {
     go.disabled = true
     errEl.textContent = ''
     try {
-      await api.post(`/nodes/${tokenTarget}/token`, { token })
-      await api.post(`/nodes/${tokenTarget}/approve`)
+      await api.post(`/api/nodes/${tokenTarget}/token`, { token })
+      await api.post(`/api/nodes/${tokenTarget}/approve`)
       tokenDialog.close()
       await refresh()
     } catch (err) {
@@ -178,23 +206,47 @@ export function nodesView() {
     tokenTarget = null
     tokenReason = null
   })
-  el.querySelector('#discover').addEventListener('click', async (e) => {
+
+  // ---- unified add-node dialog: Scan Network | Manual IP ----
+  const scanTab = () => el.querySelector('[data-tab="scan"]')
+  const manualTab = () => el.querySelector('[data-tab="manual"]')
+  const showTab = (which) => {
+    scanTab().classList.toggle('active', which === 'scan')
+    manualTab().classList.toggle('active', which === 'manual')
+    el.querySelector('#add-scan').classList.toggle('hidden', which !== 'scan')
+    el.querySelector('#add-manual').classList.toggle('hidden', which !== 'manual')
+  }
+  scanTab().addEventListener('click', () => showTab('scan'))
+  manualTab().addEventListener('click', () => showTab('manual'))
+
+  const bcastHint = el.querySelector('#add-bcast-hint')
+  bcastHint.hidden = broadcast
+  bcastHint.textContent = 'No non-loopback interface detected — UDP broadcast may not reach other hosts. Prefer Manual IP for remote nodes.'
+
+  el.querySelector('#add-node').addEventListener('click', () => {
+    showTab('scan')
+    addDialog.showModal()
+  })
+  el.querySelector('#add-cancel').addEventListener('click', () => addDialog.close())
+  el.querySelector('#add-scan-go').addEventListener('click', async (e) => {
     const btn = e.currentTarget
     btn.disabled = true
     btn.textContent = 'Scanning…'
     try {
-      const res = await api.post('/nodes/discover')
+      const res = await api.post('/api/nodes/discover')
+      el.querySelector('#add-scan-result').textContent = `Found ${res.found} node(s)`
+      addDialog.close()
       flash(`Found ${res.found} node(s)`)
       await refresh()
     } catch (err) {
       flash(err.message)
     } finally {
       btn.disabled = false
-      btn.textContent = 'Discover'
+      btn.textContent = 'Scan network'
     }
   })
-  el.querySelector('#add-node').addEventListener('click', () => dialog.showModal())
-  dialog.querySelector('form').addEventListener('submit', async (e) => {
+  el.querySelector('#manual-form').addEventListener('submit', async (e) => {
+    e.preventDefault()
     const f = new FormData(e.currentTarget)
     const body = {
       ip: f.get('ip'),
@@ -207,13 +259,39 @@ export function nodesView() {
       return
     }
     try {
-      await api.post('/nodes', body)
-      dialog.close()
+      await api.post('/api/nodes', body)
+      addDialog.close()
       await refresh()
     } catch (err) {
       flash(err.message)
     }
   })
+
+  // ---- pairing token panel ----
+  let pairToken = ''
+  const pairCode = el.querySelector('#pair-token')
+  const pairShow = el.querySelector('#pair-show')
+  const pairNote = el.querySelector('#pair-note')
+  api.get('/api/wizard')
+    .then((w) => {
+      broadcast = !!w.broadcast
+      bcastHint.hidden = broadcast
+      pairToken = w.token || ''
+      if (!pairToken) {
+        pairNote.innerHTML = 'No pairing token configured — set <code>pairing_token</code> in <code>/etc/gopit/gopit.yaml</code>.'
+        return
+      }
+      pairCode.textContent = maskToken(pairToken)
+      pairShow.hidden = false
+      pairNote.innerHTML = 'Also in <code>/etc/gopitd/gopitd.yaml</code> on the node'
+      pairShow.onclick = () => {
+        const shown = pairCode.textContent !== pairToken
+        pairCode.textContent = shown ? maskToken(pairToken) : pairToken
+        pairShow.textContent = shown ? 'Show' : 'Hide'
+      }
+      pairNote.parentElement.appendChild(copyButton(pairToken))
+    })
+    .catch(() => {})
 
   const timer = setInterval(() => refresh().catch(() => {}), 5000)
   refresh().catch((err) => flash(err.message))

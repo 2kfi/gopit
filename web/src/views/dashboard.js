@@ -77,7 +77,7 @@ export function dashboardView({ uuid }) {
       bar.innerHTML = `
         <div class="disk-meta"><span class="mono">${esc(d.mount)}</span>
           <span class="mono dim">${fmtBytes(d.used)} / ${fmtBytes(d.total)}</span></div>
-        <div class="bar"><div class="fill" style="width:${d.percent}%"></div></div>`
+        <div class="bar"><div class="fill" style="width:${Math.min(100, Math.max(0, Number(d.percent) || 0))}%"></div></div>`
       disksEl.appendChild(bar)
     }
     rxSpark.push(s.net.rx_per_sec)

@@ -32,10 +32,11 @@ server binary via `embed.go`, built by Vite.
    as `discovered` and does nothing until an operator hits **Approve**. A
    manual **Add Node** path (by IP + port) exists for nodes that don't hear
    broadcasts.
-3. **Pair** — approval assigns the server's `pairing_token` to the node. The
-   agent's own `token` must match; every control connection is authenticated
-   against it. Approving a node with the wrong token leaves it `pending`
-   until the agent's token is fixed.
+3. **Pair** — approval assigns the server's `pairing_token` to a node that
+   has none (agents installed with `TOKEN=<pairing_token>` carry it already);
+   every control connection is authenticated against the node's token.
+   Approving a node whose token doesn't match leaves it `approved` but
+   offline until the token is fixed (token endpoint).
 4. **Connect** — the server dials the agent. If the agent announced
    `tls: true` it connects via `wss://`, otherwise `ws://` (skipping
    certificate verification by default, see `tls_skip_verify`).
@@ -43,10 +44,9 @@ server binary via `embed.go`, built by Vite.
 Node lifecycle: an announce (or manual add) inserts the node as
 `pending`; approval moves it to `approved`; a successful authenticated
 connection flips it to `online`; losing the connection returns it to
-`offline`. A node stuck `pending` after approval usually means its `token`
-doesn't match the server's `pairing_token` (the announce never carries
-secrets — the server assigns the token on its side, and the agent must hold
-the same one).
+`offline`. A node stuck `approved` but offline usually means its `token`
+doesn't match the agent's (`POST /api/nodes/{uuid}/token` fixes it; the
+announce never carries secrets).
 
 ## Wire protocol
 
@@ -60,8 +60,9 @@ A single JSON envelope over WebSocket, both directions:
 ```
 
 - Requests are correlated by `id`; events carry `method` instead.
-- The server proxies client API calls `/api/nodes/:uuid/rpc` into requests
-  and fans out events to the connected browser session.
+- The server proxies client API calls (`/api/nodes/:uuid/docker/*`,
+  `/firewall/*`, ...) into agent requests over the node's control connection
+  and fans out events to connected browser sessions.
 - Errors come back as `error` strings — no custom error codes.
 
 ### Method catalog
@@ -69,8 +70,8 @@ A single JSON envelope over WebSocket, both directions:
 | Method | Direction | Description |
 |:-------|:----------|:------------|
 | `auth` | client → agent | first message on a control connection; carries the token |
-| `system.info` | request | hostname, OS, platform, arch, kernel, CPUs, uptime, agent version, boot time |
-| `system.stats` | event (1/s) | CPU percent, memory, disk, network, load, temps, uptime |
+| `system.info` | request | hostname, ip, port, OS, arch, agent version, uptime |
+| `system.stats` | event (1/s) | CPU percent + cores, memory, disk, network (bytes + per-second deltas) |
 | `docker.containers.list` | request | ID, name, image, state, status, ports, created |
 | `docker.container.inspect` | request | full container JSON |
 | `docker.container.start` / `.stop` / `.remove` | request | lifecycle control |
@@ -83,7 +84,7 @@ A single JSON envelope over WebSocket, both directions:
 | `terminal.resize` | request | PTY size change |
 | `terminal.close` | request | ends the session |
 | `terminal.exit` | event | PTY exited; carries the exit code |
-| `ufw.status` | request | parsed ufw status (rules, default policy, active) |
+| `ufw.status` | request | firewall status (rules, default policy, active); backend is nftfw by default, ufw in legacy mode |
 | `ufw.rule.add` / `ufw.rule.delete` | request | allow/deny rule management |
 | `ufw.toggle` | request | enable/disable — only if `allow_toggle: true` |
 
@@ -92,8 +93,8 @@ A single JSON envelope over WebSocket, both directions:
 On a terminal connection, TextMessage frames are JSON (control), BinaryMessage
 frames are raw PTY bytes:
 
-- client → agent (text): `{"op":"resize","cols":N,"rows":N}`, `{"op":"close"}`
-- agent → client (text): `{"op":"exit","code":N}`
+- client → agent (text): `{"type":"resize","cols":N,"rows":N}`, `{"type":"close"}`
+- agent → client (text): `{"type":"exit"}`
 
 ## Data (SQLite, `modernc.org/sqlite` — no CGO)
 

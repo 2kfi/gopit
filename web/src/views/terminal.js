@@ -34,12 +34,14 @@ export function terminalView({ uuid }) {
         <h2>Connect to shell</h2>
         <p class="sub dim" style="margin:0">Credentials are sent to the node agent once; never stored.</p>
         <label>Username
-          <input name="user" required autocomplete="off" autocapitalize="off" spellcheck="false">
+          <input name="user" required autocomplete="off" autocapitalize="off" spellcheck="false"
+                 placeholder="enter node username (not root). For root access, use \`sudo\` inside.">
         </label>
         <label>Password
           <input name="pass" type="password" required autocomplete="off">
         </label>
         <p class="form-error" id="login-error"></p>
+        <p class="hint" id="login-hint" hidden>The shell runs as your user. Need root? Type <code>su -l</code> and enter the root password, or use <code>sudo &lt;cmd&gt;</code> for single commands.</p>
         <div class="dialog-actions">
           <button class="btn" type="button" id="login-cancel">Cancel</button>
           <button class="btn btn-primary" id="login-go">Connect</button>
@@ -169,6 +171,7 @@ export function terminalView({ uuid }) {
         }
         if (m.type === 'open') {
           loginError.textContent = ''
+          connectWS = null // dialog.close() must not kill the session socket
           dialog.close()
           buildSession(id, user, ws)
           return
@@ -216,9 +219,25 @@ export function terminalView({ uuid }) {
       if (sessions.size === 0) setStatus('idle')
     }
   })
+  // First dialog open: hint once per browser (su -l / sudo explanation).
+  const hintKey = 'gopit_terminal_hint_shown'
+  const showHint = () => {
+    const hint = el.querySelector('#login-hint')
+    let shown = false
+    try {
+      shown = localStorage.getItem(hintKey) === '1'
+    } catch {}
+    hint.hidden = shown
+    if (!shown) {
+      try {
+        localStorage.setItem(hintKey, '1')
+      } catch {}
+    }
+  }
   el.querySelector('#btn-new').addEventListener('click', () => {
     loginForm.reset()
     loginError.textContent = ''
+    showHint()
     dialog.showModal()
     loginForm.elements.user.focus()
   })

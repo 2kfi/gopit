@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -47,7 +48,8 @@ type Node struct {
 
 // Store wraps the SQLite database.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	maintStop chan struct{}
 }
 
 // Open opens (creating) the database at path and runs migrations.
@@ -124,8 +126,49 @@ func (s *Store) migrate() error {
 	return nil
 }
 
-// Close closes the underlying database.
-func (s *Store) Close() error { return s.db.Close() }
+// Close closes the underlying database and stops the maintenance loop.
+func (s *Store) Close() error {
+	if s.maintStop != nil {
+		select {
+		case <-s.maintStop:
+		default:
+			close(s.maintStop)
+		}
+	}
+	return s.db.Close()
+}
+
+// Ping checks the database connection is alive.
+func (s *Store) Ping() error { return s.db.Ping() }
+
+// StartMaintenance runs a periodic WAL checkpoint + VACUUM. intervalHours of 0
+// disables it. The loop stops when the store is closed; an error is logged and
+// the schedule continues (VACUUM needs an exclusive lock; the next tick retries).
+func (s *Store) StartMaintenance(intervalHours int) {
+	if intervalHours <= 0 {
+		return
+	}
+	interval := time.Duration(intervalHours) * time.Hour
+	s.maintStop = make(chan struct{})
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.maintStop:
+				return
+			case <-t.C:
+				if _, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+					slog.Warn("wal checkpoint failed", "err", err)
+					continue
+				}
+				if _, err := s.db.Exec(`VACUUM`); err != nil {
+					slog.Warn("vacuum failed", "err", err)
+				}
+			}
+		}
+	}()
+}
 
 // --- users ---
 
@@ -204,6 +247,13 @@ func (s *Store) UpdateUserPassword(id int64, hash string) error {
 func (s *Store) CountUsers() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n, err
+}
+
+// CountNodes returns the total number of registered nodes.
+func (s *Store) CountNodes() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&n)
 	return n, err
 }
 

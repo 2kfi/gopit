@@ -40,7 +40,7 @@ export function sidebar(user, nodes) {
 
   el.querySelector('#logout').addEventListener('click', async () => {
     try {
-      await api.post('/logout')
+      await api.post('/api/logout')
     } catch {}
     state.setUser(null)
     navigate('#/login')
@@ -48,7 +48,7 @@ export function sidebar(user, nodes) {
 
   const poll = setInterval(async () => {
     try {
-      state.setNodes(await api.get('/nodes'))
+      state.setNodes(await api.get('/api/nodes'))
       render()
     } catch {}
   }, 5000)

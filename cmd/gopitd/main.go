@@ -14,7 +14,11 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "configs/gopitd.yaml", "path to agent YAML config")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
 	flag.Parse()
+	if *logFormat == "json" {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	}
 
 	a, err := agent.New(*cfgPath)
 	if err != nil {

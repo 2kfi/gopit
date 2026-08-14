@@ -30,9 +30,12 @@ type Status struct {
 //	[ 1] 22/tcp ALLOW IN Anywhere
 //	[ 2] 22/tcp (v6) ALLOW IN Anywhere (v6)
 //	[ 3] Anywhere REJECT IN 192.168.1.5 on eth0
+//	[ 4] 80,443/tcp (Nginx Full) ALLOW IN Anywhere (v6)
 //
-// The "(v6)" marker is folded into To/From for parsing and stripped for display.
-var ruleRe = regexp.MustCompile(`^\[\s*(\d+)\]\s+(\S+?)(?:\s*\(v6\))?\s+(ALLOW|DENY|REJECT|LIMIT)\s+(IN|OUT)\s+(.+?)(?:\s+on\s+(\S+))?\s*$`)
+// To is captured lazily up to the action token so multi-word app-profile
+// names ("Nginx Full") survive; the "(v6)" marker is folded into To/From for
+// parsing and stripped for display.
+var ruleRe = regexp.MustCompile(`^\[\s*(\d+)\]\s+(.+?)(?:\s*\(v6\))?\s+(ALLOW|DENY|REJECT|LIMIT)\s+(IN|OUT)\s+(.+?)(?:\s+on\s+(\S+))?\s*$`)
 
 func parseNumbered(out string) []Rule {
 	var rules []Rule

@@ -21,18 +21,20 @@ type Callbacks struct {
 
 // Manager connects to approved nodes and reconnects with backoff.
 type Manager struct {
-	store   *store.Store
-	cb      Callbacks
-	skipTLS bool
-	mu      sync.Mutex
-	conns   map[string]*Conn // nodeID -> live connection
-	looping map[string]bool  // nodeID -> a connectLoop goroutine is running
-	stop    chan struct{}
+	store    *store.Store
+	cb       Callbacks
+	skipTLS  bool
+	mu       sync.Mutex
+	conns    map[string]*Conn // nodeID -> live connection
+	looping  map[string]bool  // nodeID -> a connectLoop goroutine is running
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // Conn is a live agent connection.
 type Conn struct {
 	WS       *websocket.Conn
+	writeMu  sync.Mutex
 	subMu    sync.Mutex
 	subs     map[chan protocol.Envelope]struct{} // browser subscribers
 	stop     chan struct{}
@@ -77,16 +79,18 @@ func (c *Conn) broadcast(e protocol.Envelope) {
 	c.subMu.Unlock()
 }
 
-// Close stops all connections and goroutines.
+// Close stops all connections and goroutines. Safe to call multiple times.
 func (m *Manager) Close() {
-	close(m.stop)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, c := range m.conns {
-		c.WS.Close()
-	}
-	m.conns = map[string]*Conn{}
-	m.looping = map[string]bool{}
+	m.stopOnce.Do(func() {
+		close(m.stop)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, c := range m.conns {
+			c.WS.Close()
+		}
+		m.conns = map[string]*Conn{}
+		m.looping = map[string]bool{}
+	})
 }
 
 // Connect dials a node. Returns existing connection if already live.
@@ -130,7 +134,12 @@ func (m *Manager) pingLoop(c *Conn) {
 		case <-c.stop:
 			return
 		case <-t.C:
-			if err := c.WS.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+			err := func() error {
+				c.writeMu.Lock()
+				defer c.writeMu.Unlock()
+				return c.WS.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+			}()
+			if err != nil {
 				c.WS.Close()
 				return
 			}
@@ -151,6 +160,10 @@ func (m *Manager) readLoop(nodeID string, conn *Conn) {
 		close(conn.stop)
 	}()
 	for {
+		// Half-open conns must not survive: gorilla auto-pongs pings, so a
+		// read deadline that outlives two pings only fires when the agent is
+		// really gone.
+		conn.WS.SetReadDeadline(time.Now().Add(90 * time.Second))
 		var e protocol.Envelope
 		if err := wsReadJSON(conn.WS, &e); err != nil {
 			return
@@ -181,7 +194,10 @@ func (m *Manager) Reconcile() {
 	}
 	for i := range nodes {
 		n := nodes[i]
-		if n.Status != store.StatusApproved && n.Status != store.StatusOffline {
+		// approved, offline and online are all "approved but not connected":
+		// online nodes become connectable again after a server restart, when
+		// their stored status still says online.
+		if n.Status != store.StatusApproved && n.Status != store.StatusOffline && n.Status != store.StatusOnline {
 			continue
 		}
 		m.mu.Lock()
@@ -232,6 +248,11 @@ func (m *Manager) connectLoop(n store.Node) {
 	}
 }
 
+// Done returns a channel that is closed when the manager stops.
+func (m *Manager) Done() <-chan struct{} {
+	return m.stop
+}
+
 // Conn returns the live connection for nodeID, or nil.
 func (m *Manager) Conn(nodeID string) *Conn {
 	m.mu.Lock()
@@ -239,20 +260,50 @@ func (m *Manager) Conn(nodeID string) *Conn {
 	return m.conns[nodeID]
 }
 
-// Request sends a request and waits for the matching response.
+// Count returns the number of live node connections.
+func (m *Manager) Count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.conns)
+}
+
+// WriteJSON sends a JSON message over the WebSocket connection thread-safely.
+func (c *Conn) WriteJSON(v any) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.WS.WriteJSON(v)
+}
+
+// Request sends a request and waits for the matching response. The
+// subscription is registered before the request hits the wire so a fast
+// response can never be missed.
 func (c *Conn) Request(method string, payload any, timeout time.Duration) (protocol.Envelope, error) {
 	e := protocol.NewRequest(method, payload)
-	if err := c.WS.WriteJSON(e); err != nil {
-		return protocol.Envelope{}, err
-	}
 	ch := make(chan protocol.Envelope, 8)
 	c.Subscribe(ch)
 	defer c.Unsubscribe(ch)
+	if err := c.WriteJSON(e); err != nil {
+		return protocol.Envelope{}, err
+	}
 	resp, ok := protocol.WaitForID(ch, e.ID, timeout)
 	if !ok {
 		return protocol.Envelope{}, &protocol.ErrRemote{Msg: "request timed out"}
 	}
 	return resp, nil
+}
+
+// Drop closes a node's live connection. The reconnect loop notices the node
+// is gone (or the conn closed) and exits; call after deleting the node.
+func (m *Manager) Drop(nodeID string) {
+	m.mu.Lock()
+	c, ok := m.conns[nodeID]
+	if ok {
+		delete(m.conns, nodeID)
+	}
+	m.mu.Unlock()
+	if ok {
+		c.WS.Close()
+	}
 }
 
 func wsReadJSON(ws *websocket.Conn, out any) error {
