@@ -36,25 +36,21 @@ jobs:
       - name: Clean previous artifacts
         run: make clean
 
-      - name: Build Linux binaries
+      - name: Build Linux binaries and checksums
         env:
           GOOS: linux
           GOARCH: amd64
           CGO_ENABLED: 0
-        run: |
-          make build-agent
-          make build-server
-
-      - name: Package release archive
-        run: |
-          tar -czf gopit-linux-amd64.tar.gz -C bin gopit gopitd
-          sha256sum gopit-linux-amd64.tar.gz > gopit-linux-amd64.sha256
+        run: make release-linux
 
       - name: Create/Update Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            gopit-linux-amd64.tar.gz
+            bin/gopit
+            bin/gopitd
+            gopit.sha256
+            gopitd.sha256
             gopit-linux-amd64.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

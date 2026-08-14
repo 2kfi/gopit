@@ -34,8 +34,10 @@ clean:
 release-linux: clean web/dist
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit ./cmd/gopit
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
-	tar -czf gopit-linux-amd64.tar.gz -C bin gopit gopitd
-	sha256sum gopit-linux-amd64.tar.gz > gopit-linux-amd64.sha256
+	chmod +x bin/gopit bin/gopitd
+	sha256sum bin/gopit > gopit.sha256
+	sha256sum bin/gopitd > gopitd.sha256
+	sha256sum bin/gopit bin/gopitd > gopit-linux-amd64.sha256
 
 dev-server:
 	$(GO) run ./cmd/gopit -config configs/gopit.yaml
