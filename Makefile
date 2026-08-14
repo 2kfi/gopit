@@ -3,7 +3,7 @@ NPM ?= npm
 AGENT_VERSION ?= dev
 LDFLAGS := -X gopit/internal/agent/system.AgentVersion=$(AGENT_VERSION)
 
-.PHONY: build-agent build-server build-all test vet clean dev-server dev-web
+.PHONY: build-agent build-server build-all test vet clean dev-server dev-web release-linux
 
 build-agent:
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
@@ -30,6 +30,12 @@ vet:
 clean:
 	rm -rf bin web/dist web/node_modules
 	rm -f gopit.db gopit.db-shm gopit.db-wal
+
+release-linux: clean web/dist
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit ./cmd/gopit
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
+	tar -czf gopit-linux-amd64.tar.gz -C bin gopit gopitd
+	sha256sum gopit-linux-amd64.tar.gz > gopit-linux-amd64.sha256
 
 dev-server:
 	$(GO) run ./cmd/gopit -config configs/gopit.yaml
