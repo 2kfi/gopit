@@ -1,3 +1,5 @@
+//go:build linux
+
 package nftfw
 
 // The boot-time firewall config. gopit owns /etc/nftables.conf: the agent

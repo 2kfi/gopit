@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package nftfw manages the host firewall directly via the kernel's nftables
 // subsystem (netlink). No ufw, no iptables, no sudo: the agent only needs
 // CAP_NET_ADMIN (set by its systemd unit).

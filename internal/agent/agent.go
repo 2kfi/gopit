@@ -12,7 +12,6 @@ import (
 	"gopit/internal/agent/config"
 	"gopit/internal/agent/discovery"
 	dockerd "gopit/internal/agent/docker"
-	"gopit/internal/agent/nftfw"
 	"gopit/internal/agent/system"
 	"gopit/internal/agent/ufw"
 	agentws "gopit/internal/agent/ws"
@@ -73,15 +72,16 @@ func New(cfgPath string) (*Agent, error) {
 	return &Agent{cfg: cfg, uuid: id, beacon: beacon, ws: wsSrv, collector: col}, nil
 }
 
-// newFirewall picks the firewall backend from config: nftfw (direct netlink,
-// needs CAP_NET_ADMIN, no sudo) or the legacy ufw sudo integration.
+// newFirewall picks the firewall backend from config. The nftfw (direct
+// netlink) backend is Linux-only and lives in firewall_linux.go; other
+// platforms get a backend that reports the feature as unavailable.
 func newFirewall(cfg *config.Config) fwBackend {
 	if cfg.Firewall == "ufw" {
 		slog.Info("firewall backend: ufw (sudo)")
 		return ufw.New(cfg.Ufw.BinaryPath, cfg.Ufw.AllowToggle)
 	}
 	slog.Info("firewall backend: nftfw (no sudo)")
-	return nftfw.New(cfg.Ufw.AllowToggle)
+	return nftfwNew(cfg)
 }
 
 // Run starts the beacon and WS server, blocking until either fails.
