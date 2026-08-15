@@ -260,6 +260,8 @@ func (a *AuthAPI) RotateJWT(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to persist secret")
 		return
 	}
+	a.auth.mu.Lock()
 	a.auth.secret = []byte(secretStr)
+	a.auth.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]string{"jwt_secret": secretStr})
 }

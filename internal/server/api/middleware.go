@@ -40,6 +40,8 @@ type Auth struct {
 	store  *store.Store
 	secret []byte
 	ttl    time.Duration
+
+	mu sync.RWMutex // guards secret, which RotateJWT swaps at runtime
 }
 
 // NewAuth creates the authenticator.
@@ -58,7 +60,10 @@ func (a *Auth) Sign(user *store.User) (string, error) {
 			ExpiresAt: jwt.NewNumericDate(now.Add(a.ttl)),
 		},
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(a.secret)
+	a.mu.RLock()
+	secret := a.secret
+	a.mu.RUnlock()
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
 
 // Middleware rejects unauthenticated requests with 401.
@@ -86,7 +91,10 @@ func (a *Auth) verify(r *http.Request) (*store.User, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("bad signing method")
 		}
-		return a.secret, nil
+		a.mu.RLock()
+		secret := a.secret
+		a.mu.RUnlock()
+		return secret, nil
 	}, jwt.WithIssuer("gopit"))
 	if err != nil || !tok.Valid {
 		return nil, errors.New("invalid token")

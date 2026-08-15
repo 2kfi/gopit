@@ -1,7 +1,7 @@
 # gopitd (agent) configuration
 listen_addr: 0.0.0.0           # IP the WS + UDP beacon bind to
 port: 1221                     # TCP WS and UDP beacon port for this agent
-token: change-me               # pre-shared pairing token the server stores per node
+token: fade14c664765547f2b6d6f16546f0d6334bbe68efda0c3a  # dev-only pre-shared pairing token; production installs get one via `TOKEN=... ./install.sh agent`
 uuid_path: /etc/gopitd/node.id  # file the agent reads/creates its node UUID in
 stats_interval_seconds: 1      # how often system.stats is pushed to the control connection
 
