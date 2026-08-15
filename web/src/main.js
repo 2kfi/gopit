@@ -21,6 +21,7 @@ const routes = [
 ]
 
 let current = null
+let currentSidebar = null
 
 export function navigate(hash) {
   location.hash = hash
@@ -39,6 +40,10 @@ function matchRoute(hash) {
 
 async function render() {
   if (current && current.unmount) current.unmount()
+  if (currentSidebar) {
+    currentSidebar.unmount()
+    currentSidebar = null
+  }
   const app = document.getElementById('app')
   app.innerHTML = ''
 
@@ -68,6 +73,7 @@ async function render() {
   if (!isWizard) {
     const sb = sidebar(state.user, state.nodes)
     app.appendChild(sb.el)
+    currentSidebar = sb
   }
   const main = document.createElement('main')
   main.className = 'content'
@@ -100,6 +106,7 @@ async function boot() {
   window.addEventListener('hashchange', render)
   try {
     const me = await api.get('/api/me')
+    api.setCSRF(me.csrf_token)
     state.setUser(me)
     try {
       state.setNodes(await api.get('/api/nodes'))

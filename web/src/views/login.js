@@ -52,7 +52,8 @@ export function loginView() {
     const f = new FormData(e.currentTarget)
     errEl.textContent = ''
     try {
-      await api.post('/api/login', { username: f.get('username'), password: f.get('password') })
+      const data = await api.post('/api/login', { username: f.get('username'), password: f.get('password') })
+      api.setCSRF(data.csrf_token)
       state.setUser({ username: f.get('username') })
       navigate('#/nodes')
     } catch (err) {

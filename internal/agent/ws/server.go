@@ -151,6 +151,9 @@ func (s *Server) serveConn(c *wsconn.Conn) {
 	st := &ConnState{}
 	done := make(chan struct{}) // closes when the connection dies; streaming handlers cancel on it
 	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("agent ws conn panic", "err", r)
+		}
 		close(done)
 		if s := st.takeTerm(); s != nil {
 			s.Close() // SIGHUP the session's process group, reap via its reaper goroutine
@@ -192,7 +195,8 @@ func (s *Server) serveConn(c *wsconn.Conn) {
 		}
 		c.SetReadDeadline(time.Now().Add(readDeadline))
 		if mt == websocket.BinaryMessage {
-			if st.curTerm() == nil {
+			t := st.curTerm()
+			if t == nil {
 				continue // stray data frame without a session: drop
 			}
 			b, err := io.ReadAll(r)
@@ -200,7 +204,7 @@ func (s *Server) serveConn(c *wsconn.Conn) {
 				return
 			}
 			if len(b) > 0 { // empty-input guard: a 0-byte frame must not hit the pty
-				st.curTerm().Write(b)
+				t.Write(b)
 			}
 			continue
 		}

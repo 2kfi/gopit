@@ -1,7 +1,10 @@
 GO ?= go
 NPM ?= npm
-AGENT_VERSION ?= dev
-LDFLAGS := -X gopit/internal/agent/system.AgentVersion=$(AGENT_VERSION)
+VERSION ?= dev
+OS ?= $(shell $(GO) env GOOS)
+ARCH ?= $(shell $(GO) env GOARCH)
+AGENT_VERSION ?= $(VERSION)
+LDFLAGS := -X gopit/internal/agent/system.AgentVersion=$(AGENT_VERSION) -X gopit/internal/server/api.Version=$(VERSION)
 
 .PHONY: build-agent build-server build-all test vet clean dev-server dev-web release-linux
 
@@ -32,12 +35,12 @@ clean:
 	rm -f gopit.db gopit.db-shm gopit.db-wal
 
 release-linux: clean web/dist
-	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit ./cmd/gopit
-	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
-	chmod +x bin/gopit bin/gopitd
-	sha256sum bin/gopit > gopit.sha256
-	sha256sum bin/gopitd > gopitd.sha256
-	sha256sum bin/gopit bin/gopitd > gopit-linux-amd64.sha256
+	mkdir -p bin
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit-server-$(VERSION)-$(OS)-$(ARCH) ./cmd/gopit
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit-daemon-$(VERSION)-$(OS)-$(ARCH) ./cmd/gopitd
+	chmod +x bin/gopit-server-$(VERSION)-$(OS)-$(ARCH) bin/gopit-daemon-$(VERSION)-$(OS)-$(ARCH)
+	sha256sum bin/gopit-server-$(VERSION)-$(OS)-$(ARCH) > gopit-server-$(VERSION)-$(OS)-$(ARCH).sha256
+	sha256sum bin/gopit-daemon-$(VERSION)-$(OS)-$(ARCH) > gopit-daemon-$(VERSION)-$(OS)-$(ARCH).sha256
 
 dev-server:
 	$(GO) run ./cmd/gopit -config configs/gopit.yaml

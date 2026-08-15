@@ -256,7 +256,7 @@ export function terminalView({ uuid }) {
         connectWS.close()
         connectWS = null
       }
-      dialog.close()
+      if (dialog.open) dialog.close()
     },
   }
 }

@@ -21,13 +21,14 @@ export function sidebar(user, nodes) {
   el.querySelector('#side-user').textContent = user.username
 
   const render = () => {
-    count.textContent = nodes.length
+    const live = state.nodes
+    count.textContent = live.length
     list.innerHTML = ''
-    if (nodes.length === 0) {
+    if (live.length === 0) {
       list.innerHTML = `<li class="dim">No nodes discovered yet.</li>`
       return
     }
-    for (const n of nodes) {
+    for (const n of live) {
       const li = document.createElement('li')
       const active = location.hash.startsWith(`#/node/${n.id}/`)
       li.className = active ? 'active' : ''

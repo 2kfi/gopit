@@ -1,8 +1,12 @@
+let csrfToken = ''
+
 async function request(method, path, body) {
+  const headers = body ? { 'Content-Type': 'application/json' } : {}
+  if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken
   const res = await fetch(path, {
     method,
     credentials: 'same-origin',
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   })
   const data = await res.json().catch(() => ({}))
@@ -27,6 +31,9 @@ export const api = {
   post: (path, body) => request('POST', path, body),
   put: (path, body) => request('PUT', path, body),
   del: (path) => request('DELETE', path),
+  setCSRF: (t) => {
+    csrfToken = t
+  },
 }
 
 // isUnauthorized marks 401s for the router to bounce to login.

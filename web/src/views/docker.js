@@ -271,7 +271,7 @@ export function dockerView({ uuid }) {
       logWS = null
     }
     logState.textContent = ''
-    logDialog.close()
+    if (logDialog.open) logDialog.close()
   }
 
   const openLogs = (c) => {

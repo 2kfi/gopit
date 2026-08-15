@@ -149,7 +149,11 @@ func (a *AuthAPI) Me(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "username": u.Username})
+	t := a.csrf.Current()
+	if t == "" {
+		t = a.csrf.Generate()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "username": u.Username, "csrf_token": t})
 }
 
 // CreateUser adds a user (admin only).
