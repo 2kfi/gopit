@@ -6,7 +6,7 @@ ARCH ?= $(shell $(GO) env GOARCH)
 AGENT_VERSION ?= $(VERSION)
 LDFLAGS := -X gopit/internal/agent/system.AgentVersion=$(AGENT_VERSION) -X gopit/internal/server/api.Version=$(VERSION)
 
-.PHONY: build-agent build-server build-all test vet clean dev-server dev-web release-linux
+.PHONY: build-agent build-server build-all test vet clean dev-server dev-web release
 
 build-agent:
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
@@ -34,7 +34,9 @@ clean:
 	rm -rf bin web/dist web/node_modules
 	rm -f gopit.db gopit.db-shm gopit.db-wal
 
-release-linux: clean web/dist
+# Build release binaries for the current GOOS/GOARCH. The workflow loops
+# this over a platform matrix; unique os-arch names keep all outputs in bin/.
+release: web/dist
 	mkdir -p bin
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit-server-$(VERSION)-$(OS)-$(ARCH) ./cmd/gopit
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit-daemon-$(VERSION)-$(OS)-$(ARCH) ./cmd/gopitd
