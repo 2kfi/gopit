@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gopit/internal/server"
+	"gopit/internal/configresolve"
 	serverconfig "gopit/internal/server/config"
 	"gopit/internal/server/store"
 )
@@ -30,9 +31,14 @@ func main() {
 		switch os.Args[1] {
 		case "backup":
 			fs := flag.NewFlagSet("backup", flag.ExitOnError)
-			cfgPath := fs.String("config", "configs/gopit.yaml", "path to server YAML config")
+			cfgPath := fs.String("config", "", "path to server YAML config (default: configs/gopit.yaml, then ~/.config/gopit/gopit.yaml)")
 			setupLogging(fs)
-			cfg, err := serverconfig.Load(*cfgPath)
+			path, err := configresolve.ResolveServer(*cfgPath)
+			if err != nil {
+				slog.Error("backup: config resolve failed", "err", err)
+				os.Exit(1)
+			}
+			cfg, err := serverconfig.Load(path)
 			if err != nil {
 				slog.Error("backup: config load failed", "err", err)
 				os.Exit(1)
@@ -45,9 +51,14 @@ func main() {
 			return
 		case "restore":
 			fs := flag.NewFlagSet("restore", flag.ExitOnError)
-			cfgPath := fs.String("config", "configs/gopit.yaml", "path to server YAML config")
+			cfgPath := fs.String("config", "", "path to server YAML config (default: configs/gopit.yaml, then ~/.config/gopit/gopit.yaml)")
 			setupLogging(fs)
-			cfg, err := serverconfig.Load(*cfgPath)
+			path, err := configresolve.ResolveServer(*cfgPath)
+			if err != nil {
+				slog.Error("restore: config resolve failed", "err", err)
+				os.Exit(1)
+			}
+			cfg, err := serverconfig.Load(path)
 			if err != nil {
 				slog.Error("restore: config load failed", "err", err)
 				os.Exit(1)
@@ -61,7 +72,7 @@ func main() {
 		}
 	}
 
-	cfgPath := flag.String("config", "configs/gopit.yaml", "path to server YAML config")
+	cfgPath := flag.String("config", "", "path to server YAML config (default: configs/gopit.yaml, then ~/.config/gopit/gopit.yaml)")
 	drainTimeout := flag.Duration("drain-timeout", 10*time.Second, "how long to wait for active WebSocket sessions on shutdown")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	flag.Parse()
@@ -69,7 +80,13 @@ func main() {
 		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	}
 
-	srv, err := server.New(*cfgPath)
+	path, err := configresolve.ResolveServer(*cfgPath)
+	if err != nil {
+		slog.Error("config resolve failed", "err", err)
+		os.Exit(1)
+	}
+
+	srv, err := server.New(path)
 	if err != nil {
 		slog.Error("server init failed", "err", err)
 		os.Exit(1)

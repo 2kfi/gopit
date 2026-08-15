@@ -2,25 +2,28 @@ import { api } from '../api.js'
 import { navigate, state } from '../main.js'
 import { pwScore, PASSWORD_METER } from '../util.js'
 
-export function loginView() {
+// First-run admin setup: shown instead of login while the server has no
+// users. Creating this account makes it the admin (user id 1).
+export function setupView() {
   const el = document.createElement('div')
   el.className = 'login-wrap'
   el.innerHTML = `
     <div class="login-card panel">
       <div class="brand">gopit<span class="caret">▍</span></div>
-      <p class="sub">Multi-node Linux control plane</p>
-      <form id="login-form" autocomplete="off">
+      <p class="sub">Welcome — create your admin account</p>
+      <form id="setup-form" autocomplete="off">
         <label>Username <input name="username" required autofocus></label>
         <label>Password <input name="password" type="password" required></label>
         <div class="pw-meter hidden" id="pw-meter">
           <div class="pw-meter-fill" id="pw-meter-fill"></div>
         </div>
-        <p class="form-error" id="login-error"></p>
-        <button class="btn btn-primary btn-block" type="submit">Sign in</button>
+        <label>Confirm <input name="confirm" type="password" required></label>
+        <p class="form-error" id="setup-error"></p>
+        <button class="btn btn-primary btn-block" type="submit">Create account</button>
       </form>
     </div>
   `
-  const errEl = el.querySelector('#login-error')
+  const errEl = el.querySelector('#setup-error')
   const meter = el.querySelector('#pw-meter')
   const fill = el.querySelector('#pw-meter-fill')
   el.querySelector('input[name="password"]').addEventListener('input', (e) => {
@@ -37,11 +40,19 @@ export function loginView() {
     e.preventDefault()
     const f = new FormData(e.currentTarget)
     errEl.textContent = ''
+    const username = f.get('username').trim()
+    const password = f.get('password')
+    if (password !== f.get('confirm')) {
+      errEl.textContent = 'Passwords do not match'
+      return
+    }
     try {
-      const data = await api.post('/api/login', { username: f.get('username'), password: f.get('password') })
+      await api.post('/api/setup', { username, password })
+      const data = await api.post('/api/login', { username, password })
       api.setCSRF(data.csrf_token)
-      state.setUser({ username: f.get('username') })
-      navigate('#/nodes')
+      state.setupNeeded = false
+      state.setUser({ username })
+      navigate('#/wizard')
     } catch (err) {
       errEl.textContent = err.message
     }

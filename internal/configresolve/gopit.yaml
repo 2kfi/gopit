@@ -1,0 +1,13 @@
+# gopit (server) configuration — written automatically on first run.
+# Edit this file and restart the server to apply changes.
+listen_addr: ":8080"
+db_path: gopit.db
+jwt_secret: ""
+admin_username: ""
+admin_password: ""
+discovery_broadcast_addr: 255.255.255.255
+discovery_port: 1221
+tls_skip_verify: true
+pairing_token: __RANDOM_PAIRING_TOKEN__
+db_maintenance_interval: 168
+password_min_score: 2

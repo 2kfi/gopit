@@ -65,6 +65,8 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 			}
 			writeJSON(w, http.StatusOK, resp)
 		})
+		r.Get("/setup/status", authAPI.SetupStatus)
+		r.Post("/setup", authAPI.Setup)
 		r.Post("/login", authAPI.Login)
 		r.Group(func(r chi.Router) {
 			r.Use(auth.Middleware)

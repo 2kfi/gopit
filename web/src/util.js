@@ -15,6 +15,20 @@ export function maskToken(t) {
   return `${t.slice(0, 4)}${'•'.repeat(12)}${t.slice(-4)}`
 }
 
+// pwScore is a lightweight client-side strength estimate (0-4) mirroring the
+// server's zxcvbn threshold so the meter guides before the API rejects.
+export function pwScore(pw) {
+  if (!pw) return 0
+  let s = 0
+  if (pw.length >= 10) s++
+  if (pw.length >= 14) s++
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw) && /\d/.test(pw)) s++
+  if (/[^a-zA-Z0-9]/.test(pw)) s++
+  return Math.min(4, s)
+}
+
+export const PASSWORD_METER = ['bad', 'bad', 'warn', 'ok', 'ok']
+
 // copyText copies with a clipboard fallback for non-secure (http) contexts.
 export async function copyText(text) {
   try {

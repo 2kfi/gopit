@@ -1,0 +1,9 @@
+# gopitd (agent) configuration — written automatically on first run.
+# Set token to the server's pairing_token (or use the server wizard's
+# "set token" flow on a discovered node).
+listen_addr: 0.0.0.0
+port: 1221
+token: change-me
+uuid_path: node.id
+stats_interval_seconds: 1
+firewall: nftfw

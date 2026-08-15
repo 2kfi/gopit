@@ -81,13 +81,17 @@ connection exists, so TCP 1221 on every node is non-negotiable.
 ## Run without systemd (dev / containers)
 
 ```bash
-make build-all
-./bin/gopit -config configs/gopit.example.yaml
-./bin/gopitd  -config configs/gopitd.example.yaml
+./gopit
+./gopitd
 ```
 
-Both binaries only need `-config <path>`; default config paths are the
-`configs/*.example.yaml` files relative to the working directory.
+On first run each binary writes a bundled default config to
+`~/.config/gopit/gopit.yaml` / `gopitd.yaml` and uses it from then on
+(`configs/<name>.yaml` in the working directory is preferred when present).
+The server shows a **Create admin account** screen instead of login until a
+user exists. Config lookup order: explicit `-config` → `./configs/<name>.yaml`
+→ `~/.config/gopit/<name>.yaml` (created on first run). Explicit `-config`
+paths must already exist.
 
 ## Uninstall
 

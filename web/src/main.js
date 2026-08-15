@@ -2,6 +2,7 @@ import { api } from './api.js'
 import './styles.css'
 
 import { loginView } from './views/login.js'
+import { setupView } from './views/setup.js'
 import { nodesView } from './views/nodes.js'
 import { wizardView } from './views/wizard.js'
 import { dashboardView } from './views/dashboard.js'
@@ -48,10 +49,10 @@ async function render() {
   app.innerHTML = ''
 
   if (!state.user) {
-    const login = loginView()
-    current = login
-    app.appendChild(login.el)
-    login.mount && login.mount()
+    const view = state.setupNeeded ? setupView() : loginView()
+    current = view
+    app.appendChild(view.el)
+    view.mount && view.mount()
     return
   }
 
@@ -89,6 +90,7 @@ export const state = {
   user: null,
   nodes: [],
   wizardDone: false,
+  setupNeeded: false,
   setUser(u) {
     state.user = u
     render()
@@ -119,6 +121,14 @@ async function boot() {
       // wizard status can't be read; the wizard view polls and self-heals
     }
   } catch (err) {
+    // Not authenticated: on a fresh server (no users) show first-run setup
+    // instead of login, so the admin account can be created.
+    try {
+      const s = await api.get('/api/setup/status')
+      state.setupNeeded = !s.configured
+    } catch {
+      state.setupNeeded = false
+    }
     state.setUser(null)
     if (location.hash !== '#/login') navigate('#/login')
   }

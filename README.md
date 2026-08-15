@@ -40,8 +40,18 @@ netlink (kernel netfilter), no sudo, `CAP_NET_ADMIN` on the systemd unit.
 Set `firewall: ufw` to fall back to the legacy ufw/sudo path — only then use
 `--apply-ufw` at install.
 
-Prefer to run it manually (no systemd)? Both binaries take `-config`, and
-example configs live in `configs/`:
+Prefer to run it manually (no systemd)? Both binaries work out of the box:
+on first run they write a default config to
+`~/.config/gopit/gopit.yaml` (`gopitd.yaml` for the agent) and the server
+shows a **Create admin account** screen instead of login:
+
+```bash
+./gopit                          # first run: writes ~/.config/gopit/gopit.yaml
+./gopitd                         # first run: writes ~/.config/gopit/gopitd.yaml
+```
+
+You can also pass `-config <path>` explicitly, and example configs live in
+`configs/`:
 
 ```bash
 make build-all                       # built to bin/
