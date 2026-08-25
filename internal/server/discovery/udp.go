@@ -135,7 +135,14 @@ func UpsertReplies(s *store.Store, replies []Reply) []store.Node {
 			slog.Warn("upsert discovered node failed", "id", i.UUID, "err", err)
 			continue
 		}
-		out = append(out, *n)
+		// Read back: an existing row kept its approved status/token; report
+		// the stored reality, not the always-pending row we just built.
+		stored, err := s.GetNode(i.UUID)
+		if err != nil {
+			out = append(out, *n) // vanished between upsert and read; best effort
+			continue
+		}
+		out = append(out, *stored)
 	}
 	return out
 }

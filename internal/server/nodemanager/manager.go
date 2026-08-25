@@ -3,6 +3,7 @@ package nodemanager
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -33,10 +34,14 @@ type Manager struct {
 
 // Conn is a live agent connection.
 type Conn struct {
-	WS       *websocket.Conn
-	writeMu  sync.Mutex
-	subMu    sync.Mutex
-	subs     map[chan protocol.Envelope]struct{} // browser subscribers
+	WS      *websocket.Conn
+	writeMu sync.Mutex
+	subMu   sync.Mutex
+	// subs maps a browser subscriber channel to an optional envelope filter
+	// (nil = receive everything). Requests subscribe filtered so event bursts
+	// (stats, log floods) can never crowd their matching response out of the
+	// channel buffer.
+	subs     map[chan protocol.Envelope]func(protocol.Envelope) bool
 	stop     chan struct{}
 	stopOnce sync.Once
 }
@@ -55,8 +60,17 @@ func New(s *store.Store, cb Callbacks, tlsSkipVerify bool) *Manager {
 
 // Subscribe registers a channel to receive this node's events.
 func (c *Conn) Subscribe(ch chan protocol.Envelope) {
+	c.subscribe(ch, nil)
+}
+
+// SubscribeFiltered registers a channel that only receives matching envelopes.
+func (c *Conn) SubscribeFiltered(ch chan protocol.Envelope, match func(protocol.Envelope) bool) {
+	c.subscribe(ch, match)
+}
+
+func (c *Conn) subscribe(ch chan protocol.Envelope, match func(protocol.Envelope) bool) {
 	c.subMu.Lock()
-	c.subs[ch] = struct{}{}
+	c.subs[ch] = match
 	c.subMu.Unlock()
 }
 
@@ -70,7 +84,10 @@ func (c *Conn) Unsubscribe(ch chan protocol.Envelope) {
 // broadcast fans an envelope out to all browser subscribers.
 func (c *Conn) broadcast(e protocol.Envelope) {
 	c.subMu.Lock()
-	for ch := range c.subs {
+	for ch, match := range c.subs {
+		if match != nil && !match(e) {
+			continue
+		}
 		select {
 		case ch <- e:
 		default: // drop when a browser subscriber is slow
@@ -106,7 +123,7 @@ func (m *Manager) Connect(n *store.Node) (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn := &Conn{WS: ws, subs: make(map[chan protocol.Envelope]struct{}), stop: make(chan struct{})}
+	conn := &Conn{WS: ws, subs: make(map[chan protocol.Envelope]func(protocol.Envelope) bool), stop: make(chan struct{})}
 	m.mu.Lock()
 	if old, ok := m.conns[n.ID]; ok { // raced with another dial
 		m.mu.Unlock()
@@ -212,7 +229,8 @@ func (m *Manager) Reconcile() {
 
 // connectLoop keeps trying with exponential backoff until the node is gone or
 // the manager stops. A dropped established connection also re-enters the
-// loop, with the backoff reset.
+// loop, with the backoff reset. The node is re-read from the store on every
+// attempt so a rotated token or moved address takes effect without a restart.
 func (m *Manager) connectLoop(n store.Node) {
 	defer func() {
 		m.mu.Lock()
@@ -227,12 +245,19 @@ func (m *Manager) connectLoop(n store.Node) {
 			return
 		default:
 		}
-		if _, err := m.store.GetNode(n.ID); err != nil {
+		fresh, err := m.store.GetNode(n.ID)
+		if err != nil {
 			return // node deleted
 		}
+		n = *fresh
 		conn, err := m.Connect(&n)
 		if err != nil {
-			slog.Warn("node connect failed", "id", n.ID, "ip", n.IP, "err", err)
+			var remote *protocol.ErrRemote
+			if errors.As(err, &remote) {
+				slog.Warn("node auth rejected (check stored agent token)", "id", n.ID, "ip", n.IP)
+			} else {
+				slog.Warn("node connect failed", "id", n.ID, "ip", n.IP, "err", err)
+			}
 			select {
 			case <-m.stop:
 				return
@@ -276,11 +301,14 @@ func (c *Conn) WriteJSON(v any) error {
 
 // Request sends a request and waits for the matching response. The
 // subscription is registered before the request hits the wire so a fast
-// response can never be missed.
+// response can never be missed, and it is filtered to this request's ID so
+// concurrent event traffic cannot crowd the response out of the buffer.
 func (c *Conn) Request(method string, payload any, timeout time.Duration) (protocol.Envelope, error) {
 	e := protocol.NewRequest(method, payload)
 	ch := make(chan protocol.Envelope, 8)
-	c.Subscribe(ch)
+	c.SubscribeFiltered(ch, func(x protocol.Envelope) bool {
+		return x.Type == protocol.TypeResponse && x.ID == e.ID
+	})
 	defer c.Unsubscribe(ch)
 	if err := c.WriteJSON(e); err != nil {
 		return protocol.Envelope{}, err

@@ -24,14 +24,13 @@ import (
 type AuthAPI struct {
 	store    *store.Store
 	auth     *Auth
-	csrf     *CSRFToken
 	minScore int // minimum password strength (zxcvbn 0-4); enforced on create/change
 	hooks    *webhooks.Store
 }
 
 // NewAuthAPI wires the auth routes.
-func NewAuthAPI(s *store.Store, a *Auth, csrf *CSRFToken, minScore int, hooks *webhooks.Store) *AuthAPI {
-	return &AuthAPI{store: s, auth: a, csrf: csrf, minScore: minScore, hooks: hooks}
+func NewAuthAPI(s *store.Store, a *Auth, minScore int, hooks *webhooks.Store) *AuthAPI {
+	return &AuthAPI{store: s, auth: a, minScore: minScore, hooks: hooks}
 }
 
 type creds struct {
@@ -85,10 +84,19 @@ func (l *loginLimiter) reset(ip string) {
 
 var loginRL = &loginLimiter{limit: 10, window: 15 * time.Minute, windowStart: time.Now(), failures: map[string]int{}}
 
-// clientIP extracts the caller IP, honoring the proxy's X-Forwarded-For.
+// trustXFF enables X-Forwarded-For handling in clientIP; set from the
+// trust_proxy config flag. Default off: a directly exposed server must not
+// let attackers rotate the header to dodge rate limits. Enable ONLY when
+// gopit runs behind a reverse proxy that overwrites X-Forwarded-For.
+var trustXFF = false
+
+// clientIP extracts the caller IP, honoring the proxy's X-Forwarded-For
+// only when trust_proxy is enabled.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	if trustXFF {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			return strings.TrimSpace(strings.Split(xff, ",")[0])
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -122,7 +130,7 @@ func (a *AuthAPI) Login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "sign failed")
 		return
 	}
-	csrfToken := a.csrf.Generate()
+	csrfToken := a.auth.csrfFor(token) // per-session token, bound to this login
 	cookie := &http.Cookie{
 		Name: cookieName, Value: token, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode,
@@ -149,10 +157,7 @@ func (a *AuthAPI) Me(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	t := a.csrf.Current()
-	if t == "" {
-		t = a.csrf.Generate()
-	}
+	t := a.auth.CSRFToken(r)
 	writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "username": u.Username, "csrf_token": t})
 }
 
@@ -220,6 +225,10 @@ func (a *AuthAPI) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "new password >= 6 chars")
 		return
 	}
+	if len(p.NewPassword) > 72 {
+		writeErr(w, http.StatusBadRequest, "new password must be at most 72 bytes")
+		return
+	}
 	if score := passwordScore(p.NewPassword); score < a.minScore {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("new password too weak (score %d/%d, need %d): add length, mixed case, digits or symbols", score, 4, a.minScore))
 		return
@@ -229,7 +238,11 @@ func (a *AuthAPI) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "old password incorrect")
 		return
 	}
-	hash, _ := bcrypt.GenerateFromPassword([]byte(p.NewPassword), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(p.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "hash failed")
+		return
+	}
 	if err := a.store.UpdateUserPassword(u.ID, string(hash)); err != nil {
 		writeErr(w, http.StatusInternalServerError, "db failed")
 		return

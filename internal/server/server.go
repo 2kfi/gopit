@@ -81,7 +81,7 @@ func New(cfgPath string) (*Server, error) {
 		Port:          cfg.DiscoveryPort,
 		Timeout:       500 * time.Millisecond,
 	}
-	handler := api.Router(s, m, disc, cfg.JWTSecret, cfg.PairingToken, cfg.TLSSkipVerify, cfg.RateLimitPerMin, cfg.PasswordMinScore, hooks)
+	handler := api.Router(s, m, disc, cfg.JWTSecret, cfg.PairingToken, cfg.TLSSkipVerify, cfg.TrustProxy, cfg.RateLimitPerMin, cfg.PasswordMinScore, hooks)
 	srv.http = &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

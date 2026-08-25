@@ -25,7 +25,7 @@ func setupEnv(t *testing.T, passwordMinScore int) *env {
 		OnStats:  func(string, protocol.SystemStats) {},
 	}, true)
 	disc := &discovery.Client{BroadcastAddr: "127.0.0.1", Port: 1221, Timeout: 50 * time.Millisecond}
-	h := Router(s, m, disc, testSecret, "pair-tok", false, 100, passwordMinScore, webhooks.New(nil))
+	h := Router(s, m, disc, testSecret, "pair-tok", false, false, 100, passwordMinScore, webhooks.New(nil))
 	ts := httptest.NewServer(h)
 	e := &env{s: s, m: m, ts: ts, origin: ts.URL}
 	t.Cleanup(e.Close)

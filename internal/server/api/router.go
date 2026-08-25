@@ -22,13 +22,13 @@ import (
 var Version = "dev"
 
 // Router builds the full HTTP router: API + embedded SPA.
-func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secret, pairToken string, tlsSkipVerify bool, rateLimitPerMin int, passwordMinScore int, hooks *webhooks.Store) http.Handler {
+func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secret, pairToken string, tlsSkipVerify, trustProxy bool, rateLimitPerMin int, passwordMinScore int, hooks *webhooks.Store) http.Handler {
+	trustXFF = trustProxy
 	r := chi.NewRouter()
 	r.Use(metrics.Middleware)
 	auth := NewAuth(s, secret)
-	csrf := NewCSRFToken()
 	rl := NewRateLimiter(rateLimitPerMin, rateLimitPerMin/5+1)
-	authAPI := NewAuthAPI(s, auth, csrf, passwordMinScore, hooks)
+	authAPI := NewAuthAPI(s, auth, passwordMinScore, hooks)
 	nodesAPI := NewNodesAPI(s, m, *disc, pairToken)
 	statusAPI := NewStatusAPI(m, s)
 	dockerAPI := NewDockerAPI(m, hooks)
@@ -36,7 +36,9 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 	terminalAPI := NewTerminalAPI(s, tlsSkipVerify)
 
 	// /metrics is unauthenticated (scraped by Prometheus); keep it outside
-	// /api so it skips auth, CSRF and rate limiting.
+	// /api so it skips auth, CSRF and rate limiting. It exposes node counts,
+	// live WS gauge and version — no secrets — but firewall it at the proxy
+	// if that metadata must not leak.
 	r.Get("/metrics", metrics.Handler().ServeHTTP)
 
 	r.Route("/api", func(r chi.Router) {
@@ -70,7 +72,7 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 		r.Post("/login", authAPI.Login)
 		r.Group(func(r chi.Router) {
 			r.Use(auth.Middleware)
-			r.Use(CSRFMiddleware(csrf))
+			r.Use(CSRFMiddleware(auth))
 			r.Get("/me", authAPI.Me)
 			r.Post("/logout", authAPI.Logout)
 			r.Put("/password", authAPI.ChangePassword)

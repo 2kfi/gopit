@@ -50,7 +50,12 @@ func New(cfgPath string) (*Agent, error) {
 	info.UUID = id
 	info.TLS = cfg.TLSCert != ""
 
-	beacon := discovery.NewBeacon(info)
+	beacon := discovery.NewBeacon(func() protocol.NodeInfo {
+		// re-resolve per reply so a DHCP change is announced without restart
+		i := col.Info(cfg.Port)
+		i.UUID, i.TLS = id, cfg.TLSCert != ""
+		return i
+	})
 	dk, err := dockerd.New()
 	if err != nil {
 		slog.Warn("docker unavailable, docker.* methods will error", "err", err)

@@ -23,6 +23,7 @@ var AgentVersion = "dev"
 // Collector samples host metrics; it is safe for concurrent use.
 type Collector struct {
 	mu      sync.Mutex
+	lastCPU cpu.TimesStat
 	lastNet psnet.IOCountersStat
 	lastAt  time.Time
 }
@@ -50,14 +51,13 @@ func (c *Collector) Info(port int) protocol.NodeInfo {
 	}
 }
 
-// Stats returns a fresh system snapshot with per-second network deltas.
+// Stats returns a fresh system snapshot with per-interval CPU and network
+// deltas. Deltas are computed from collector-held previous samples (like the
+// net counters) instead of gopsutil's cpu.Percent(0), which keeps ONE global
+// last-sample: concurrent callers (statsLoop + explicit requests) would
+// otherwise corrupt each other's delta window and report phantom spikes.
 func (c *Collector) Stats() protocol.SystemStats {
 	now := time.Now()
-	per, _ := cpu.Percent(0, false)
-	percent := 0.0
-	if len(per) > 0 {
-		percent = per[0]
-	}
 
 	var memStats protocol.MemStats
 	if m, err := mem.VirtualMemory(); err == nil {
@@ -80,27 +80,40 @@ func (c *Collector) Stats() protocol.SystemStats {
 		}
 	}
 
+	cpuTimes, cpuErr := cpu.Times(false)
+	netCounters, netErr := psnet.IOCounters(false)
+
+	c.mu.Lock()
+	dt := now.Sub(c.lastAt).Seconds()
+	first := c.lastAt.IsZero()
+
+	percent := 0.0
+	if cpuErr == nil && len(cpuTimes) > 0 {
+		if !first && dt > 0 {
+			percent = busyPercent(c.lastCPU, cpuTimes[0])
+		}
+		c.lastCPU = cpuTimes[0]
+	}
+
 	var rx, tx, rxPerSec, txPerSec uint64
-	if counters, err := psnet.IOCounters(false); err == nil && len(counters) > 0 {
-		rx, tx = counters[0].BytesRecv, counters[0].BytesSent
-		c.mu.Lock()
-		dt := now.Sub(c.lastAt).Seconds()
-		// lastAt is zero until the first sample: the first delta is skipped,
-		// otherwise (since-boot counters / tiny dt) reads as a huge spike.
-		if !c.lastAt.IsZero() && dt > 0 {
+	if netErr == nil && len(netCounters) > 0 {
+		rx, tx = netCounters[0].BytesRecv, netCounters[0].BytesSent
+		if !first && dt > 0 {
 			// monotonic guard: an interface reset makes the counter go
 			// backwards; report 0 for that sample instead of a phantom rate.
-			prev := c.lastNet
-			if rx >= prev.BytesRecv {
-				rxPerSec = uint64(float64(rx-prev.BytesRecv) / dt)
+			if rx >= c.lastNet.BytesRecv {
+				rxPerSec = uint64(float64(rx-c.lastNet.BytesRecv) / dt)
 			}
-			if tx >= prev.BytesSent {
-				txPerSec = uint64(float64(tx-prev.BytesSent) / dt)
+			if tx >= c.lastNet.BytesSent {
+				txPerSec = uint64(float64(tx-c.lastNet.BytesSent) / dt)
 			}
 		}
-		c.lastNet, c.lastAt = counters[0], now
-		c.mu.Unlock()
+		c.lastNet = netCounters[0]
 	}
+	if first || dt > 0 {
+		c.lastAt = now
+	}
+	c.mu.Unlock()
 
 	return protocol.SystemStats{
 		CPU:  protocol.CPUStats{Percent: percent, Cores: runtime.NumCPU()},
@@ -108,6 +121,24 @@ func (c *Collector) Stats() protocol.SystemStats {
 		Disk: disks,
 		Net:  protocol.NetStats{RxBytes: rx, TxBytes: tx, RxPerSec: rxPerSec, TxPerSec: txPerSec},
 	}
+}
+
+// busyPercent computes the busy fraction between two cumulative CPU-time
+// snapshots (idle + iowait count as not-busy, matching gopsutil semantics).
+func busyPercent(prev, cur cpu.TimesStat) float64 {
+	total := cur.Total() - prev.Total()
+	idle := (cur.Idle + cur.Iowait) - (prev.Idle + prev.Iowait)
+	if total <= 0 {
+		return 0
+	}
+	p := 100 * (total - idle) / total
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
 }
 
 // firstOutboundIP returns the first non-loopback IPv4 of this host, or "".
@@ -154,7 +185,11 @@ func ifaceIPv4(i net.Interface) string {
 // isVirtualIface reports whether a network interface is a container/bridge
 // construct rather than a physical or primary host interface.
 func isVirtualIface(name string) bool {
-	for _, prefix := range []string{"docker", "br-", "veth", "virbr", "lxc", "lxd"} {
+	for _, prefix := range []string{
+		"docker", "br-", "veth", "virbr", "lxc", "lxd",
+		"cni", "flannel", "cali", "cilium_", "cbr", "podman", // k8s/CNI bridges
+		"tailscale", "wg", "kube-", // mesh/overlay tunnels
+	} {
 		if strings.HasPrefix(name, prefix) {
 			return true
 		}

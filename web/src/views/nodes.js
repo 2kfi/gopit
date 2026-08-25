@@ -41,6 +41,8 @@ function nodeRow(n) {
       } catch (err) {
         if (err.status === 400) openTokenDialog(n.id, err.message)
         else flash(err.message)
+      } finally {
+        btn.disabled = false
       }
     })
   })
@@ -56,6 +58,7 @@ function actionsFor(n) {
 
 let tableBody
 let flashEl
+let flashTimer
 let broadcast = true // cached wizard broadcast capability; refresh() reads it
 
 // Pairing dialog: discovered nodes carry no token (the server no longer hands
@@ -79,7 +82,8 @@ function flash(msg) {
   if (flashEl) {
     flashEl.textContent = msg
     flashEl.style.opacity = 1
-    setTimeout(() => (flashEl.style.opacity = 0), 3000)
+    clearTimeout(flashTimer)
+    flashTimer = setTimeout(() => (flashEl.style.opacity = 0), 3000)
   }
 }
 
@@ -112,7 +116,7 @@ export function nodesView() {
         <button class="btn btn-primary" id="add-node">Add node</button>
       </div>
     </header>
-    <div class="flash" id="flash"></div>
+    <div class="flash" id="flash" role="status"></div>
 
     <div class="panel terminal pair-panel">
       <div class="term-bar"><span></span><span></span><span></span>pairing token</div>
@@ -152,7 +156,7 @@ export function nodesView() {
             <label>IP <input name="ip" required placeholder="10.0.0.5"></label>
             <label>Port <input name="port" type="number" value="1221" required></label>
             <label>Hostname <input name="hostname" placeholder="optional"></label>
-            <label>Token <input name="token" required placeholder="agent pairing token"></label>
+            <label>Token <input name="token" type="password" required placeholder="agent pairing token" autocomplete="off"></label>
             <div class="dialog-actions">
               <button class="btn" type="button" id="add-cancel">Cancel</button>
               <button class="btn btn-primary" type="submit">Add</button>
@@ -166,7 +170,7 @@ export function nodesView() {
         <h2>Pair node</h2>
         <p class="sub dim" style="margin:0" id="token-reason"></p>
         <label>Agent token
-          <input name="token" required placeholder="token from the node's gopitd config" spellcheck="false">
+          <input name="token" type="password" required placeholder="token from the node's gopitd config" spellcheck="false" autocomplete="off">
         </label>
         <p class="form-error" id="token-error"></p>
         <div class="dialog-actions">

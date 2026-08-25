@@ -30,6 +30,13 @@ export function dockerView({ uuid }) {
     ${nodeTabs(uuid, 'docker').outerHTML}
     <div class="flash" id="flash"></div>
 
+    <div class="tabs">
+      <button class="tab active" data-tab="containers">Containers</button>
+      <button class="tab" data-tab="images">Images</button>
+      <button class="tab" data-tab="volumes">Volumes</button>
+      <button class="tab" data-tab="stacks">Stacks</button>
+    </div>
+
     <section id="pane-containers">
       <div class="panel terminal">
         <div class="term-bar"><span></span><span></span><span></span>containers</div>
@@ -166,7 +173,7 @@ export function dockerView({ uuid }) {
       const tr = document.createElement('tr')
       tr.innerHTML = `
         <td class="mono">${(im.repo_tags && im.repo_tags.length) ? esc(im.repo_tags.join(', ')) : '<span class="dim">&lt;none&gt;</span>'}</td>
-        <td class="mono dim">${esc(im.id.slice(7, 19))}</td>
+        <td class="mono dim">${esc((im.id || '').slice(7, 19))}</td>
         <td class="mono dim">${esc(fmtBytes(im.size))}</td>
         <td class="mono dim">${esc(fmtCreated(im.created))}</td>
         <td class="mono dim">${esc(im.containers || 0)}</td>
@@ -401,7 +408,10 @@ export function dockerView({ uuid }) {
     loadVolumes().catch((e) => flash(e.message)),
     loadStacks().catch((e) => flash(e.message)),
   ])
-  const timer = setInterval(() => loadContainers().catch(() => {}), 8000)
+  const timer = setInterval(() => {
+    if (document.hidden) return // skip polling in background tabs
+    loadContainers().catch(() => {})
+  }, 8000)
   loadAll()
 
   return {

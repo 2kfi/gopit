@@ -2,7 +2,8 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"crypto/subtle"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -87,15 +90,7 @@ func (a *Auth) verify(r *http.Request) (*store.User, error) {
 		return nil, errors.New("no cookie")
 	}
 	var claims Claims
-	tok, err := jwt.ParseWithClaims(c.Value, &claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("bad signing method")
-		}
-		a.mu.RLock()
-		secret := a.secret
-		a.mu.RUnlock()
-		return secret, nil
-	}, jwt.WithIssuer("gopit"))
+	tok, err := jwt.ParseWithClaims(c.Value, &claims, a.keyFunc, jwt.WithIssuer("gopit"))
 	if err != nil || !tok.Valid {
 		return nil, errors.New("invalid token")
 	}
@@ -104,6 +99,52 @@ func (a *Auth) verify(r *http.Request) (*store.User, error) {
 		return nil, errors.New("user not found")
 	}
 	return u, nil
+}
+
+// keyFunc resolves the HMAC verification key, honoring runtime rotation.
+func (a *Auth) keyFunc(t *jwt.Token) (any, error) {
+	if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		return nil, errors.New("bad signing method")
+	}
+	a.mu.RLock()
+	secret := a.secret
+	a.mu.RUnlock()
+	return secret, nil
+}
+
+// csrfFor derives the CSRF token bound to one session JWT.
+func (a *Auth) csrfFor(sessionJWT string) string {
+	a.mu.RLock()
+	secret := a.secret
+	a.mu.RUnlock()
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(sessionJWT))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// CSRFToken returns this request's session-bound CSRF token ("" when there is
+// no session cookie). Stateless: derived from the JWT, never stored.
+func (a *Auth) CSRFToken(r *http.Request) string {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	return a.csrfFor(c.Value)
+}
+
+// identify returns the username from the session cookie without hitting the
+// store; for audit logging only.
+func (a *Auth) identify(r *http.Request) string {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	var claims Claims
+	tok, err := jwt.ParseWithClaims(c.Value, &claims, a.keyFunc, jwt.WithIssuer("gopit"))
+	if err != nil || !tok.Valid {
+		return ""
+	}
+	return claims.Username
 }
 
 // UserFrom returns the authenticated user, or nil if not authenticated.
@@ -130,30 +171,57 @@ func (a *Auth) AdminOnly(next http.Handler) http.Handler {
 
 // RateLimiter implements a token bucket per IP for global API rate limiting.
 type RateLimiter struct {
-	mu       sync.Mutex
-	visitors map[string]*rate.Limiter
-	rate     rate.Limit
-	burst    int
+	mu        sync.Mutex
+	visitors  map[string]*visitor
+	rate      rate.Limit
+	burst     int
+	lastSweep time.Time
 }
+
+type visitor struct {
+	lim      *rate.Limiter
+	lastSeen time.Time
+}
+
+// visitorTTL bounds how long an idle IP stays in the map; without it the map
+// grows without bound on internet-exposed servers.
+const visitorTTL = 10 * time.Minute
 
 // NewRateLimiter creates a limiter with requests per minute and burst.
 func NewRateLimiter(reqPerMin, burst int) *RateLimiter {
 	return &RateLimiter{
-		visitors: make(map[string]*rate.Limiter),
+		visitors: make(map[string]*visitor),
 		rate:     rate.Limit(float64(reqPerMin) / 60.0),
 		burst:    burst,
 	}
 }
 
 func (rl *RateLimiter) getLimiter(ip string) *rate.Limiter {
+	now := time.Now()
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	lim, ok := rl.visitors[ip]
+	rl.sweepLocked(now)
+	v, ok := rl.visitors[ip]
 	if !ok {
-		lim = rate.NewLimiter(rl.rate, rl.burst)
-		rl.visitors[ip] = lim
+		v = &visitor{lim: rate.NewLimiter(rl.rate, rl.burst)}
+		rl.visitors[ip] = v
 	}
-	return lim
+	v.lastSeen = now
+	return v.lim
+}
+
+// sweepLocked drops idle visitors; runs at most once per TTL/2 so the cost
+// stays amortized O(1) per request.
+func (rl *RateLimiter) sweepLocked(now time.Time) {
+	if now.Sub(rl.lastSweep) < visitorTTL/2 {
+		return
+	}
+	rl.lastSweep = now
+	for ip, v := range rl.visitors {
+		if now.Sub(v.lastSeen) > visitorTTL {
+			delete(rl.visitors, ip)
+		}
+	}
 }
 
 // Middleware applies per-IP rate limiting to /api routes.
@@ -172,44 +240,12 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// CSRFToken is the double-submit cookie + header token.
-type CSRFToken struct {
-	mu    sync.Mutex
-	token string
-}
-
-// NewCSRFToken creates a new token generator.
-func NewCSRFToken() *CSRFToken {
-	return &CSRFToken{}
-}
-
-// Generate creates a new CSRF token (32 bytes hex).
-func (c *CSRFToken) Generate() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	b := make([]byte, 32)
-	rand.Read(b)
-	c.token = hex.EncodeToString(b)
-	return c.token
-}
-
-// Current returns the active token.
-func (c *CSRFToken) Current() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.token
-}
-
-// Validate checks if the provided token matches the current one.
-func (c *CSRFToken) Validate(token string) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.token != "" && c.token == token
-}
-
-// CSRFMiddleware validates double-submit CSRF token for state-changing browser requests.
-// Only enforced when Origin header is present (browser requests).
-func CSRFMiddleware(csrf *CSRFToken) func(http.Handler) http.Handler {
+// CSRFMiddleware rejects state-changing browser requests whose X-CSRF-Token
+// (or _csrf form field) does not match this session's token — an HMAC of the
+// session JWT under the JWT secret, so it is stateless and per-session:
+// concurrent logins never invalidate each other's token. Only enforced when
+// an Origin header is present (browser requests).
+func CSRFMiddleware(a *Auth) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
@@ -221,12 +257,13 @@ func CSRFMiddleware(csrf *CSRFToken) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
-			// Check double-submit: header X-CSRF-Token or form field _csrf
-			token := r.Header.Get("X-CSRF-Token")
-			if token == "" {
-				token = r.FormValue("_csrf")
+			expected := a.CSRFToken(r)
+			got := r.Header.Get("X-CSRF-Token")
+			if got == "" {
+				got = r.FormValue("_csrf")
 			}
-			if !csrf.Validate(token) {
+			// Constant-time compare: the token gates every mutating request.
+			if expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(got)) != 1 {
 				writeErr(w, http.StatusForbidden, "invalid CSRF token")
 				return
 			}
@@ -258,10 +295,9 @@ func (a *Auth) AuditLog(next http.Handler) http.Handler {
 			return
 		}
 		start := time.Now()
-		user, _ := a.verify(r) // identity for logging only; nil when anonymous
 		uid := any("-")
-		if user != nil {
-			uid = user.ID
+		if username := a.identify(r); username != "" {
+			uid = username
 		}
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)

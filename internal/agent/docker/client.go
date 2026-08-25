@@ -2,6 +2,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,6 +49,13 @@ func New() (*API, error) {
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
+		return nil, err
+	}
+	// Ping so "docker unavailable" at startup is truthful: client construction
+	// is lazy and succeeds even with no daemon listening on the socket.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := cli.Ping(ctx); err != nil {
 		return nil, err
 	}
 	return &API{cli: cli, streams: map[string]*logStream{}}, nil
@@ -326,7 +334,7 @@ func newLineWriter(emit func(string)) *lineWriter { return &lineWriter{emit: emi
 
 func (w *lineWriter) Write(p []byte) (int, error) {
 	for {
-		i := indexByte(p, '\n')
+		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
 			w.buf = append(w.buf, p...)
 			if len(w.buf) > 64<<10 { // a stream without newlines must not grow unbounded
@@ -348,15 +356,6 @@ func (w *lineWriter) Flush() {
 		w.emit(string(w.buf))
 		w.buf = w.buf[:0]
 	}
-}
-
-func indexByte(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
 }
 
 // writeEnv sends an envelope, logging (not panicking) on a dead connection.

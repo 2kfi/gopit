@@ -327,10 +327,15 @@ func (s *Store) ListNodes() ([]Node, error) {
 	return out, rows.Err()
 }
 
-// SetNodeStatus updates a node's status (and last_seen if online).
+// SetNodeStatus updates a node's status; last_seen only advances when the
+// node actually connected (online), not on offline/rejected transitions.
 func (s *Store) SetNodeStatus(id, status string) error {
-	_, err := s.db.Exec(`UPDATE nodes SET status = ?, last_seen = ? WHERE id = ?`,
-		status, time.Now().UTC().Format(time.RFC3339), id)
+	if status == StatusOnline {
+		_, err := s.db.Exec(`UPDATE nodes SET status = ?, last_seen = ? WHERE id = ?`,
+			status, time.Now().UTC().Format(time.RFC3339), id)
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE nodes SET status = ? WHERE id = ?`, status, id)
 	return err
 }
 

@@ -21,6 +21,7 @@ type Config struct {
 	DiscoveryBroadcast string        `yaml:"discovery_broadcast_addr"`
 	DiscoveryPort      int           `yaml:"discovery_port"`
 	TLSSkipVerify      bool          `yaml:"tls_skip_verify"`
+	TrustProxy         bool          `yaml:"trust_proxy"` // honor X-Forwarded-For for rate limits; ONLY behind a proxy that overwrites the header
 	PairingToken       string        `yaml:"pairing_token"`
 	PairingTokenFile   string        `yaml:"pairing_token_file"`
 	RateLimitPerMin    int           `yaml:"rate_limit_per_min"`

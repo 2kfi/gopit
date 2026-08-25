@@ -42,6 +42,9 @@ func (h *Handler) TerminalOpen(c *wsconn.Conn, e protocol.Envelope, st *ConnStat
 	}
 	s, err := terminal.Open(req.User, req.Password, req.Cols, req.Rows, rec)
 	if err != nil {
+		if rec != nil {
+			rec.Close() // session never started; don't leak the .ttyrec handle
+		}
 		respondErr(c, e.ID, err.Error())
 		return
 	}

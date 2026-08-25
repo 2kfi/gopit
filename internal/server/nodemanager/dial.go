@@ -2,6 +2,7 @@ package nodemanager
 
 import (
 	"crypto/tls"
+	"net"
 	"strconv"
 	"time"
 
@@ -66,5 +67,5 @@ func auth(ws *websocket.Conn, token string) error {
 }
 
 func joinHost(ip string, port int) string {
-	return ip + ":" + strconv.Itoa(port)
+	return net.JoinHostPort(ip, strconv.Itoa(port))
 }

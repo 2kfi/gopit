@@ -183,6 +183,11 @@ func (a *DockerAPI) Logs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer TrackWS(ws)()
 	ws.SetReadLimit(4 << 20) // bounded browser frames, matches the agent-side limit
+	// Subscribe BEFORE the handshake request: log events emitted between the
+	// agent's first lines and our subscription would otherwise race-drop.
+	sub := make(chan protocol.Envelope, 512)
+	conn.Subscribe(sub)
+	defer conn.Unsubscribe(sub)
 	resp, err := conn.Request("docker.container.logs", map[string]string{"container_id": cid}, 15*time.Second)
 	if err != nil || (resp.Error != nil && *resp.Error != "") {
 		ws.WriteJSON(protocol.NewErrorResponse("", remoteMsg(err, resp)))
@@ -190,9 +195,6 @@ func (a *DockerAPI) Logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ws.WriteJSON(resp) // {stream:true} handshake
-	sub := make(chan protocol.Envelope, 512)
-	conn.Subscribe(sub)
-	defer conn.Unsubscribe(sub)
 
 	ping := make(chan struct{})
 	var closePing sync.Once

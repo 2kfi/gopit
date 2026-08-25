@@ -153,6 +153,7 @@ func (a *NodesAPI) Approve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "db failed")
 		return
 	}
+	n.Status = store.StatusApproved // reflect the write in the response
 	go a.manager.Reconcile()
 	writeJSON(w, http.StatusOK, n)
 }

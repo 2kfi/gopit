@@ -10,23 +10,25 @@ import (
 
 // Dump writes a full SQL text dump (schema + data, .dump-compatible) of the
 // database at path to w, reading through the modernc driver so no sqlite3 CLI
-// is needed. The BEGIN/COMMIT wraps a consistent snapshot (WAL readers see a
-// stable view), safe to run against a live server.
+// is needed. All reads run inside one sql.Tx, which pins a single connection
+// and holds an actual read transaction — WAL readers see a stable snapshot,
+// safe to run against a live server.
 func Dump(dbPath string, w io.Writer) error {
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	if _, err := db.Exec(`BEGIN`); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
 		return err
 	}
-	defer db.Exec(`COMMIT`)
+	defer tx.Rollback()
 
 	fmt.Fprintln(w, "PRAGMA foreign_keys=OFF;")
 	fmt.Fprintln(w, "BEGIN TRANSACTION;")
 
-	rows, err := db.Query(`SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`)
+	rows, err := tx.Query(`SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name`)
 	if err != nil {
 		return err
 	}
@@ -71,7 +73,7 @@ func Dump(dbPath string, w io.Writer) error {
 		if strings.HasPrefix(t.name, "sqlite_") { // internal bookkeeping: rebuilt on restore
 			continue
 		}
-		drows, err := db.Query(`SELECT * FROM "` + strings.ReplaceAll(t.name, `"`, `""`) + `"`)
+		drows, err := tx.Query(`SELECT * FROM "` + strings.ReplaceAll(t.name, `"`, `""`) + `"`)
 		if err != nil {
 			return err
 		}
@@ -103,7 +105,7 @@ func Dump(dbPath string, w io.Writer) error {
 	}
 
 	fmt.Fprintln(w, "COMMIT;")
-	return nil
+	return tx.Commit()
 }
 
 // Restore loads a SQL dump from r into a fresh database at dbPath. The dump

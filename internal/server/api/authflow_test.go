@@ -40,6 +40,13 @@ type env struct {
 }
 
 func newEnv(t *testing.T, rateLimitPerMin int) *env {
+	return newEnvTrust(t, rateLimitPerMin, false)
+}
+
+// newEnvTrust builds an env with an explicit trust_proxy setting; the
+// limiter test needs true so its XFF-spoofed failures stay isolated from
+// other tests sharing the package-global loginLimiter.
+func newEnvTrust(t *testing.T, rateLimitPerMin int, trustProxy bool) *env {
 	t.Helper()
 	s, err := store.Open(t.TempDir() + "/test.db")
 	if err != nil {
@@ -50,7 +57,7 @@ func newEnv(t *testing.T, rateLimitPerMin int) *env {
 		OnStats:  func(string, protocol.SystemStats) {},
 	}, true)
 	disc := &discovery.Client{BroadcastAddr: "127.0.0.1", Port: 1221, Timeout: 50 * time.Millisecond}
-	h := Router(s, m, disc, testSecret, "pair-tok", false, rateLimitPerMin, 0, webhooks.New(nil))
+	h := Router(s, m, disc, testSecret, "pair-tok", false, trustProxy, rateLimitPerMin, 0, webhooks.New(nil))
 	ts := httptest.NewServer(h)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("adminpass"), bcrypt.MinCost)
 	if _, err := s.CreateUser("admin", string(hash)); err != nil {
@@ -163,7 +170,7 @@ func TestLoginRejectsBadCredentials(t *testing.T) {
 }
 
 func TestLoginRateLimitEnforced(t *testing.T) {
-	e := newEnv(t, 100)
+	e := newEnvTrust(t, 100, true)
 	ip := nextTestIP()
 	a := &authCtx{xff: ip}
 	for i := 0; i < loginRL.limit; i++ {
@@ -333,6 +340,17 @@ func TestChangePassword(t *testing.T) {
 	resp, _ = e.do(t, "PUT", "/api/password", map[string]string{"old_password": "wrong", "new_password": "xyz123"}, admin)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong old password: expected 401, got %d", resp.StatusCode)
+	}
+	// new password over bcrypt's 72-byte limit -> 400, account still usable
+	long := strings.Repeat("a", 73)
+	admin = e.loginAs(t, "admin", "newpass6")
+	resp, _ = e.do(t, "PUT", "/api/password", map[string]string{"old_password": "newpass6", "new_password": long}, admin)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("73-byte password: expected 400, got %d", resp.StatusCode)
+	}
+	resp, _ = e.do(t, "POST", "/api/login", map[string]string{"username": "admin", "password": "newpass6"}, &authCtx{xff: nextTestIP()})
+	if resp.StatusCode != 200 {
+		t.Fatalf("account must survive rejected change, got %d", resp.StatusCode)
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -23,6 +25,16 @@ func NewFirewallAPI(m *nodemanager.Manager, hooks *webhooks.Store) *FirewallAPI 
 	return &FirewallAPI{manager: m, hooks: hooks}
 }
 
+// requestTimeout picks the client-facing budget for an agent call. Compose
+// invocations legitimately run up to the agent's 120s composeTimeout (image
+// pulls); everything else is a quick proxied call.
+func requestTimeout(method string) time.Duration {
+	if strings.HasPrefix(method, "docker.compose.") {
+		return 130 * time.Second
+	}
+	return dockerRequestTimeout
+}
+
 // proxyRequest runs one request against the node's agent and forwards the
 // payload. Agent offline -> 503; agent error/timeout -> 502 with its message.
 // Returns nil when the request succeeded (for post-success hooks).
@@ -32,7 +44,7 @@ func proxyRequest(m *nodemanager.Manager, w http.ResponseWriter, nodeID, method 
 		writeErr(w, http.StatusServiceUnavailable, "node offline")
 		return errNodeOffline
 	}
-	resp, err := conn.Request(method, payload, dockerRequestTimeout)
+	resp, err := conn.Request(method, payload, requestTimeout(method))
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, err.Error())
 		return err

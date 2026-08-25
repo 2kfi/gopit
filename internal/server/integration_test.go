@@ -52,7 +52,7 @@ func newGoPit(t *testing.T, disc *discovery.Client) *goPit {
 	if disc == nil {
 		disc = &discovery.Client{BroadcastAddr: "127.0.0.1", Port: 1221, Timeout: 50 * time.Millisecond}
 	}
-	ts := httptest.NewServer(api.Router(s, m, disc, "test-secret", "", false, 1000, 0, webhooks.New(nil)))
+	ts := httptest.NewServer(api.Router(s, m, disc, "test-secret", "", false, false, 1000, 0, webhooks.New(nil)))
 	g := &goPit{s: s, m: m, ts: ts}
 	t.Cleanup(g.Close)
 	return g
@@ -284,7 +284,7 @@ func TestDiscoveryApproveConnectAndStats(t *testing.T) {
 	}
 	port := freePort(t)
 	info := protocol.NodeInfo{UUID: "real-1", Hostname: "box1", IP: "127.0.0.1", Port: port, OS: "linux", Arch: "amd64", AgentVersion: "test"}
-	beacon := agentdisc.NewBeacon(info)
+	beacon := agentdisc.NewBeacon(func() protocol.NodeInfo { return info })
 	if err := beacon.Start(port); err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestTerminalErrorPathViaRealAgent(t *testing.T) {
 	}
 	port := freePort(t)
 	info := protocol.NodeInfo{UUID: "term-1", Hostname: "box1", IP: "127.0.0.1", Port: port, OS: "linux", Arch: "amd64"}
-	beacon := agentdisc.NewBeacon(info)
+	beacon := agentdisc.NewBeacon(func() protocol.NodeInfo { return info })
 	if err := beacon.Start(port); err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,9 @@ const (
 
 // Beacon answers DISCOVER broadcasts with our NodeInfo.
 type Beacon struct {
-	info  protocol.NodeInfo
+	// info is re-evaluated per reply so a DHCP address change takes effect
+	// without an agent restart.
+	info  func() protocol.NodeInfo
 	conns []*net.UDPConn
 	mu    sync.Mutex
 	done  chan struct{}
@@ -29,7 +31,7 @@ type Beacon struct {
 }
 
 // NewBeacon creates the beacon but does not start listening.
-func NewBeacon(info protocol.NodeInfo) *Beacon {
+func NewBeacon(info func() protocol.NodeInfo) *Beacon {
 	return &Beacon{info: info, done: make(chan struct{})}
 }
 
@@ -98,7 +100,7 @@ func (b *Beacon) readLoop(c *net.UDPConn) {
 		if string(buf[:n]) != DiscoverMsg {
 			continue
 		}
-		body, _ := json.Marshal(b.info)
+		body, _ := json.Marshal(b.info())
 		reply := append([]byte(AnnouncePrefix), body...)
 		b.mu.Lock()
 		_, err = c.WriteToUDP(reply, addr)

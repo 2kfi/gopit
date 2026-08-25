@@ -2,8 +2,11 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -72,5 +75,60 @@ func TestRestoreBrokenDump(t *testing.T) {
 	}
 	if _, err := Open(p); err != nil {
 		t.Fatalf("original db must survive a broken restore: %v", err)
+	}
+}
+
+// TestDumpDuringConcurrentWrites runs Dump against a live database while
+// another connection commits writes, then restores the dump. The dump must
+// read through one pinned snapshot (single sql.Tx), not error under the
+// writer, and restore to an internally consistent state.
+func TestDumpDuringConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.db")
+	s, err := Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for i := 0; i < 5; i++ {
+		if _, err := s.CreateUser(fmt.Sprintf("u%d", i), "hash"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if err := s.SetSetting("last_write", strconv.Itoa(i)); err != nil {
+				t.Errorf("concurrent write: %v", err)
+				return
+			}
+		}
+	}()
+	var buf bytes.Buffer
+	dumpErr := Dump(src, &buf)
+	close(done)
+	wg.Wait()
+	if dumpErr != nil {
+		t.Fatalf("dump against live writer: %v", dumpErr)
+	}
+	dst := filepath.Join(dir, "dst.db")
+	if err := Restore(dst, &buf); err != nil {
+		t.Fatal(err)
+	}
+	d, err := Open(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if n, _ := d.CountUsers(); n != 5 {
+		t.Fatalf("users after restore: %d", n)
 	}
 }
