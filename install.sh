@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — install the Gopit SERVER (gopit) or AGENT (gopitd) as a service.
-#
-#   sudo ./install.sh [server|agent] [--v X.Y.Z] [--bin <path>] [--url <u>] [--port N] [--apply-ufw]
-#
-# No mode? It asks. No --bin/--url? It downloads the latest GitHub release
-# for your OS/arch (--v pins a version); repo checkouts fall back to a local
-# `make` build when the download fails. TOKEN=secret sets the pairing token;
-# ADMIN_USER/PASSWORD seed the dashboard admin non-interactively.
-#
-# Idempotent: re-running re-installs the binary, restarts the service, and
-# skips anything already in place (user, config, certs, sudoers).
+# Usage: sudo ./install.sh [server|agent] [options] — full help with -h/--help.
 set -euo pipefail
 
 REPO="2kfi/gopit"
@@ -39,7 +30,20 @@ tty_read() { # $1 = var name, rest = read flags (e.g. -r -p "prompt")
 }
 
 usage() {
-  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  # heredoc, not `sed $0`: under `curl ... | bash -s` $0 is "bash", not a file.
+  cat <<'EOF'
+install.sh — install the Gopit SERVER (gopit) or AGENT (gopitd) as a service.
+
+  sudo ./install.sh [server|agent] [--v X.Y.Z] [--bin <path>] [--url <u>] [--port N] [--apply-ufw]
+
+No mode? It asks. No --bin/--url? It downloads the latest GitHub release
+for your OS/arch (--v pins a version); repo checkouts fall back to a local
+`make` build when the download fails. TOKEN=secret sets the pairing token;
+ADMIN_USER/PASSWORD seed the dashboard admin non-interactively.
+
+Idempotent: re-running re-installs the binary, restarts the service, and
+skips anything already in place (user, config, certs, sudoers).
+EOF
   exit 1
 }
 
