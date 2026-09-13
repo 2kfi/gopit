@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
-# install.sh — install the Gopit SERVER (gopit) or the Gopit AGENT (gopitd) on this machine.
+# install.sh — install the Gopit SERVER (gopit) or AGENT (gopitd) as a service.
 #
-# Exactly ONE mode at a time:
-#   ./install.sh server [--bin <path>] [--url <release-url>] [--port N]
-#   ./install.sh agent   [--bin <path>] [--url <release-url>] [--port N] [--apply-ufw]
-# --apply-ufw installs a ufw default policy; only use it with firewall: ufw in
-# the agent config (the nftfw backend refuses to manage a host ufw owns).
+#   sudo ./install.sh [server|agent] [--v X.Y.Z] [--bin <path>] [--url <u>] [--port N] [--apply-ufw]
 #
-# Binary source: --bin <file> | --url <download> | build from this repo (run from
-# a checkout with Go installed). TOKEN=secret exports a pairing token; server
-# and agent must share it (or the server generates one at install time).
+# No mode? It asks. No --bin/--url? It downloads the latest GitHub release
+# for your OS/arch (--v pins a version); repo checkouts fall back to a local
+# `make` build when the download fails. TOKEN=secret sets the pairing token.
 #
-# Everything is idempotent: re-running re-installs the binary, restarts the
-# service, and skips anything already in place (user, config, certs, sudoers).
+# Idempotent: re-running re-installs the binary, restarts the service, and
+# skips anything already in place (user, config, certs, sudoers).
 set -euo pipefail
+
+REPO="2kfi/gopit"
 
 SERVICE_USER=
 ETC_DIR=
@@ -29,7 +27,7 @@ log()  { printf '\033[1;32m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install]\033[0m %s\n' "$*"; }
 
 usage() {
-  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -46,6 +44,7 @@ while [[ $# -gt 0 ]]; do
       MODE="$1"; shift ;;
     --bin) BIN_SRC="${2:-}"; shift 2 ;;
     --url) URL_SRC="${2:-}"; shift 2 ;;
+    --v|--version) VERSION_REQ="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
     --apply-ufw) UFW_APPLY=1; shift ;;
     -h|--help) usage ;;
@@ -53,8 +52,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -z "$MODE" ]]; then
-  echo "error: pass a mode: server or agent (one at a time)" >&2
-  usage
+  if [[ -t 0 ]]; then
+    read -r -p "Install server or agent? [server/agent]: " MODE
+    case "$MODE" in s) MODE=server;; a) MODE=agent;; esac
+    [[ "$MODE" == "server" || "$MODE" == "agent" ]] || { echo "error: pick server or agent" >&2; exit 1; }
+  else
+    echo "error: pass a mode: server or agent (one at a time)" >&2
+    usage
+  fi
 fi
 
 if [[ -n "${BIN_SRC:-}" && -n "${URL_SRC:-}" ]]; then
@@ -63,8 +68,51 @@ if [[ -n "${BIN_SRC:-}" && -n "${URL_SRC:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# stage the binary: --bin, --url, or a local build from this checkout
+# binary source: --bin | --url | latest/--v GitHub release for this hardware
+# (repo checkouts fall back to a local `make` build when offline)
 # ---------------------------------------------------------------------------
+# detect_platform prints "<os> <arch>" matching the release asset matrix
+# (linux/amd64, darwin/amd64, darwin/arm64, freebsd/amd64).
+detect_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Linux) os=linux;; Darwin) os=darwin;; FreeBSD) os=freebsd;;
+    *) echo "error: unsupported OS: $(uname -s) (use --bin/--url instead)" >&2; return 1;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;;
+    *) echo "error: unsupported arch: $(uname -m) (use --bin/--url instead)" >&2; return 1;;
+  esac
+  echo "$os $arch"
+}
+
+# resolve_tag prints the release tag to install: --v value or latest via API.
+resolve_tag() {
+  if [[ -n "${VERSION_REQ:-}" ]]; then
+    echo "v${VERSION_REQ#v}"
+    return 0
+  fi
+  local tag
+  tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+    | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4) || true
+  [[ -n "${tag:-}" ]] || { echo "error: could not determine latest release (pass --v X.Y.Z or --url)" >&2; return 1; }
+  echo "$tag"
+}
+
+# fetch_release downloads one release asset (+sha256 check) to $2.
+fetch_release() {
+  local base="https://github.com/$REPO/releases/download/$TAG"
+  curl -fsSL -o "$2" "$base/$1" || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    local want got
+    want=$(curl -fsSL "$base/$1.sha256" | awk '{print $1}') || { echo "error: checksum download failed for $1" >&2; return 1; }
+    got=$(sha256sum "$2" | awk '{print $1}')
+    [[ "$got" == "$want" ]] || { echo "error: checksum mismatch for $1" >&2; return 1; }
+  else
+    warn "sha256sum not found; skipping checksum verification"
+  fi
+}
+
 stage_binary() {
   local tmp
   tmp=$(mktemp)
@@ -79,15 +127,22 @@ stage_binary() {
     fi
     chmod 0755 "$tmp"
   else
-    if [[ ! -f Makefile || -z "$(command -v go)" ]]; then
-      echo "error: no --bin/--url given, and this is not a buildable repo (Makefile + go required)" >&2
+    local prefix
+    [[ "$1" == "gopit" ]] && prefix="gopit-server" || prefix="gopit-daemon"
+    if TAG=$(resolve_tag) && read -r OS ARCH < <(detect_platform) \
+      && { log "downloading $prefix-${TAG#v}-$OS-$ARCH ($TAG)..."; fetch_release "$prefix-${TAG#v}-$OS-$ARCH" "$tmp"; }; then
+      chmod 0755 "$tmp"
+    elif [[ -f Makefile && -n "$(command -v go)" ]]; then
+      warn "release download failed; building locally instead"
+      local make_target="build-$1"
+      [[ "$1" == "gopit" ]] && make_target="build-server"
+      [[ "$1" == "gopitd" ]] && make_target="build-agent"
+      make "$make_target" >/dev/null
+      install -m 0755 "bin/$1" "$tmp"
+    else
+      echo "error: release download failed and this is not a buildable repo (Makefile + go required)" >&2
       exit 1
     fi
-    local make_target="build-$1"
-    [[ "$1" == "gopit" ]] && make_target="build-server"
-    [[ "$1" == "gopitd" ]] && make_target="build-agent"
-    make "$make_target" >/dev/null
-    install -m 0755 "bin/$1" "$tmp"
   fi
   install -m 0755 "$tmp" "$BIN_PATH"
   log "installed binary -> $BIN_PATH"
