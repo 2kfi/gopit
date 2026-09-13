@@ -115,6 +115,25 @@ resolve_tag() {
   echo "$tag"
 }
 
+# port_in_use is true when something accepts TCP on localhost:$1 (bash's
+# /dev/tcp needs no ss/netstat dependency).
+port_in_use() { (: </dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
+
+# free_port prints $1 when free, else the next free port above it (loudly).
+free_port() {
+  local p=$1 tries=0
+  while port_in_use "$p"; do
+    tries=$((tries + 1))
+    if [[ $tries -gt 20 ]]; then
+      echo "error: no free port near $1 (pass --port N)" >&2
+      return 1
+    fi
+    p=$((p + 1))
+  done
+  [[ "$p" != "$1" ]] && warn "port $1 in use; using $p instead" >&2
+  echo "$p"
+}
+
 # fetch_release downloads one release asset (+sha256 check) to $2.
 fetch_release() {
   local base="https://github.com/$REPO/releases/download/$TAG"
@@ -132,7 +151,7 @@ fetch_release() {
 stage_binary() {
   local tmp
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' EXIT
+  trap 'rm -f "${tmp:-}"' EXIT
   if [[ -n "${BIN_SRC:-}" ]]; then
     [[ -f "$BIN_SRC" ]] || { echo "error: --bin file not found: $BIN_SRC" >&2; exit 1; }
     install -m 0755 "$BIN_SRC" "$tmp"
@@ -176,6 +195,7 @@ install_server() {
   BIN_NAME=gopit
   BIN_PATH=/usr/local/bin/gopit
   [[ "$PORT" -eq 0 ]] && PORT=8080
+  PORT=$(free_port "$PORT") || exit 1
 
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -266,7 +286,16 @@ EOF
     warn "service failed to start; inspect: journalctl -u $SERVICE"
   fi
 
-  log "done. open http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORT and log in with the admin credentials above."
+  log "done. open http://$(host_ip):$PORT and log in with the admin credentials above."
+}
+
+# host_ip prints the first address from `hostname -I`, falling back to the
+# hostname and then localhost (some boxes print nothing for -I).
+host_ip() {
+  local ip
+  ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  [[ -z "$ip" ]] && ip=$(hostname 2>/dev/null || echo localhost)
+  echo "${ip:-localhost}"
 }
 
 # ---------------------------------------------------------------------------
@@ -282,6 +311,7 @@ install_agent() {
   BIN_NAME=gopitd
   BIN_PATH=/usr/local/bin/gopitd
   [[ "$PORT" -eq 0 ]] && PORT=1221
+  PORT=$(free_port "$PORT") || exit 1
 
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
