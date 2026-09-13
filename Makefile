@@ -12,11 +12,11 @@ build-agent:
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
 
 build-server: web/dist
-	$(GO) build -o bin/gopit ./cmd/gopit
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit ./cmd/gopit
 
 build-all: web/dist
 	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopitd ./cmd/gopitd
-	$(GO) build -o bin/gopit ./cmd/gopit
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/gopit ./cmd/gopit
 
 web/dist: web/node_modules
 	cd web && $(NPM) run build

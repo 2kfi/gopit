@@ -36,7 +36,10 @@ type API struct {
 
 type logStream struct{ cancel context.CancelFunc }
 
-// New detects the docker socket (rootless first, then /var/run) and builds a client.
+// New detects the docker socket (DOCKER_HOST first, then rootless, then /var/run)
+// and builds a client. DOCKER_HOST is what makes gopitd work inside a
+// container (e.g. -e DOCKER_HOST=unix:///var/run/docker.sock with the socket
+// mounted, or tcp://host.docker.internal:2375).
 func New() (*API, error) {
 	sock := "/var/run/docker.sock"
 	if xd := os.Getenv("XDG_RUNTIME_DIR"); xd != "" {
@@ -44,8 +47,12 @@ func New() (*API, error) {
 			sock = p
 		}
 	}
+	host := "unix://" + sock
+	if dh := strings.TrimSpace(os.Getenv("DOCKER_HOST")); dh != "" {
+		host = dh
+	}
 	cli, err := client.NewClientWithOpts(
-		client.WithHost("unix://"+sock),
+		client.WithHost(host),
 		client.WithAPIVersionNegotiation(),
 	)
 	if err != nil {

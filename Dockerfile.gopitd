@@ -1,0 +1,18 @@
+# gopitd — node agent. See docs/docker-agent.md for run flags and limits.
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X gopit/internal/agent/system.AgentVersion=${VERSION}" -o /out/gopitd ./cmd/gopitd
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/gopitd /usr/local/bin/gopitd
+# Config + state. Mount uuid_path dir to keep node identity across restarts.
+VOLUME ["/etc/gopitd", "/var/lib/gopitd"]
+EXPOSE 1221/tcp 1221/udp
+ENTRYPOINT ["/usr/local/bin/gopitd"]
+CMD ["-config", "/etc/gopitd/gopitd.yaml"]

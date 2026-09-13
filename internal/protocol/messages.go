@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,8 +91,11 @@ func mustMarshal(v any) json.RawMessage {
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		// Constructors are always called with marshalable values (structs/maps).
-		panic("protocol: cannot marshal payload: " + err.Error())
+		// Constructors are always called with marshalable values (structs/maps),
+		// but a programming error must degrade to an empty payload — never crash
+		// the server/agent process.
+		slog.Error("protocol: cannot marshal payload", "err", err)
+		return nil
 	}
 	return b
 }

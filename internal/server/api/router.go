@@ -3,6 +3,7 @@ package api
 import (
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -127,10 +128,21 @@ func Router(s *store.Store, m *nodemanager.Manager, disc *discovery.Client, secr
 }
 
 // spa serves the embedded frontend with index.html fallback.
+// When web/dist was not built into the binary (dev forgot `npm run build`),
+// degrade to API-only instead of panicking: the API stays up and the
+// fallback explains how to build the frontend.
 func spa(r chi.Router) {
 	dist, err := fs.Sub(webui.FS, "web/dist")
 	if err != nil {
-		panic("web/dist missing: run `npm run build` in web/ before building the server: " + err.Error())
+		slog.Error("web/dist missing: run `npm run build` in web/ before building the server", "err", err)
+		r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+			if strings.HasPrefix(req.URL.Path, "/api/") {
+				http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+				return
+			}
+			http.Error(w, "frontend not built: run `npm run build` in web/ and rebuild the server", http.StatusServiceUnavailable)
+		})
+		return
 	}
 	fileServer := http.FileServer(http.FS(dist))
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
