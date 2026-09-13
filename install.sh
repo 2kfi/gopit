@@ -119,6 +119,18 @@ resolve_tag() {
 # /dev/tcp needs no ss/netstat dependency).
 port_in_use() { (: </dev/tcp/127.0.0.1/"$1") 2>/dev/null; }
 
+# keep_or_free_port keeps $2 when our own $1 service is already running (a
+# busy port is then our previous install, swapped by the restart below) and
+# bumps to a free port otherwise.
+keep_or_free_port() {
+  if systemctl is-active --quiet "$1" 2>/dev/null; then
+    log "$1 is already running; keeping port $2 (restarting it below)" >&2
+    echo "$2"
+  else
+    free_port "$2"
+  fi
+}
+
 # free_port prints $1 when free, else the next free port above it (loudly).
 free_port() {
   local p=$1 tries=0
@@ -195,7 +207,7 @@ install_server() {
   BIN_NAME=gopit
   BIN_PATH=/usr/local/bin/gopit
   [[ "$PORT" -eq 0 ]] && PORT=8080
-  PORT=$(free_port "$PORT") || exit 1
+  PORT=$(keep_or_free_port "$SERVICE" "$PORT") || exit 1
 
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
@@ -311,7 +323,7 @@ install_agent() {
   BIN_NAME=gopitd
   BIN_PATH=/usr/local/bin/gopitd
   [[ "$PORT" -eq 0 ]] && PORT=1221
-  PORT=$(free_port "$PORT") || exit 1
+  PORT=$(keep_or_free_port "$SERVICE" "$PORT") || exit 1
 
   if ! id "$SERVICE_USER" >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
