@@ -29,8 +29,9 @@ export function navigate(hash) {
 }
 
 function matchRoute(hash) {
+  const path = hash.startsWith('#') ? hash.slice(1) : hash
   for (const r of routes) {
-    const m = hash.match(r.re)
+    const m = path.match(r.re)
     if (!m) continue
     const params = {}
     ;(r.params || []).forEach((p, i) => (params[p] = m[i + 1]))
