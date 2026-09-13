@@ -5,7 +5,8 @@
 #
 # No mode? It asks. No --bin/--url? It downloads the latest GitHub release
 # for your OS/arch (--v pins a version); repo checkouts fall back to a local
-# `make` build when the download fails. TOKEN=secret sets the pairing token.
+# `make` build when the download fails. TOKEN=secret sets the pairing token;
+# ADMIN_USER/PASSWORD seed the dashboard admin non-interactively.
 #
 # Idempotent: re-running re-installs the binary, restarts the service, and
 # skips anything already in place (user, config, certs, sudoers).
@@ -26,8 +27,19 @@ PORT=0
 log()  { printf '\033[1;32m[install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install]\033[0m %s\n' "$*"; }
 
+# tty_read works like read but takes input from the terminal when stdin is a
+# pipe (curl ... | bash), where plain `read` would eat the script/pipe.
+tty_read() { # $1 = var name, rest = read flags (e.g. -r -p "prompt")
+  local _var=$1; shift
+  if [[ ! -t 0 && -c /dev/tty ]]; then
+    read "$@" "$_var" </dev/tty
+  else
+    read "$@" "$_var"
+  fi
+}
+
 usage() {
-  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
   exit 1
 }
 
@@ -52,8 +64,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ -z "$MODE" ]]; then
-  if [[ -t 0 ]]; then
-    read -r -p "Install server or agent? [server/agent]: " MODE
+  if [[ -t 0 || -c /dev/tty ]]; then
+    tty_read MODE -r -p "Install server or agent? [server/agent]: "
     case "$MODE" in s) MODE=server;; a) MODE=agent;; esac
     [[ "$MODE" == "server" || "$MODE" == "agent" ]] || { echo "error: pick server or agent" >&2; exit 1; }
   else
@@ -178,14 +190,21 @@ install_server() {
       PAIRING_TOKEN=$(openssl rand -hex 16 2>/dev/null || cat /proc/sys/kernel/random/uuid)
     fi
     [[ -n "$PAIRING_TOKEN" ]] || { echo "error: could not generate a pairing token" >&2; exit 1; }
-    local ADMIN_USER ADMIN_PASS
-    read -r -p "Dashboard admin username [admin]: " ADMIN_USER
+    local ADMIN_USER="${ADMIN_USER:-}" ADMIN_PASS
+    if [[ -z "$ADMIN_USER" ]]; then
+      tty_read ADMIN_USER -r -p "Dashboard admin username [admin]: "
+    fi
     ADMIN_USER=${ADMIN_USER:-admin}
-    while true; do
-      read -rsp "Dashboard admin password (min 6 chars): " ADMIN_PASS; echo
-      [[ ${#ADMIN_PASS} -ge 6 ]] && break
-      echo "error: password too short" >&2
-    done
+    if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+      ADMIN_PASS=$ADMIN_PASSWORD
+      [[ ${#ADMIN_PASS} -ge 6 ]] || { echo "error: ADMIN_PASSWORD too short (min 6 chars)" >&2; exit 1; }
+    else
+      while true; do
+        tty_read ADMIN_PASS -r -s -p "Dashboard admin password (min 6 chars): "; echo
+        [[ ${#ADMIN_PASS} -ge 6 ]] && break
+        echo "error: password too short" >&2
+      done
+    fi
     # single-quote YAML quoting: embedded single quotes become '' (YAML escape)
     cat >"$CONFIG" <<EOF
 listen_addr: ":$PORT"
